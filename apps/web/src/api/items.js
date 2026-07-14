@@ -1,0 +1,30 @@
+import request from '../utils/request.js'
+
+export const listItems = data => request.post('/item/list', data)
+export const refreshItems = data => request.post('/item/refresh', data)
+export const publishItem = data => request.post('/item/publish', data, { timeout: 180000 })
+export const itemDetail = data => request.post('/item/detail', data)
+export const offShelfItem = data => request.post('/item/offShelf', data, { timeout: 60000 })
+export const remoteDeleteItem = data => request.post('/item/remoteDelete', data, { timeout: 60000 })
+export const batchDeleteItems = data => request.post('/item/batch/delete', data)
+export const updateItemPrice = data => request.post('/item/updatePrice', data, { timeout: 120000 })
+export const updateAutoReplyStatus = data => request.post('/item/updateAutoReplyStatus', data)
+export const getSyncProgress = syncId => request.get(`/item/syncProgress/${syncId}`)
+export const isSyncing = accountId => request.get(`/item/syncing/${accountId}`)
+export const runItemPolish = data => request.post('/item/polish', data, { suppressGlobalError: true })
+export const getItemPolishProgress = taskId => request.get(`/item/polishProgress/${encodeURIComponent(taskId)}`, { suppressGlobalError: true })
+export const reconcileItemPolish = data => request.post('/item/polish/reconcile', data, { suppressGlobalError: true })
+
+export const getSyncTasks = params => request.get('/item/syncTasks', { params })
+
+// ---- 自动分类相关 ----
+// 自动分类涉及图片下载+CDN上传+MTOP调用，设置较长超时（120s）
+export const autoCategory = (accountId, data) => request.post(`/xianyu/accounts/${accountId}/auto-category`, data, { timeout: 120000 })
+export const autoCategoryUpload = (accountId, file, title, description) => {
+  const form = new FormData()
+  form.append('file', file)
+  if (title) form.append('title', title)
+  if (description) form.append('description', description)
+  return request.post(`/xianyu/accounts/${accountId}/auto-category/upload`, form, { timeout: 120000 })
+}
+export const getAutoCategoryConfig = () => request.get('/xianyu/accounts/auto-category/config')

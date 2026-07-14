@@ -1,0 +1,663 @@
+"""Event-driven, duplicate-resistant real-time automatic delivery."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import re
+import time
+from typing import Any, Optional
+from urllib.parse import parse_qs, urlparse
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ..core.database import async_session
+from .realtime_delivery import (
+    RealtimeDeliveryCommand,
+    RealtimeDeliveryCoordinator,
+    RealtimeDeliveryOutcome,
+    SqlRealtimeDeliveryStore,
+    XianyuRealtimeDeliveryGateway,
+    build_realtime_delivery_event_key,
+)
+from .ws_client import ws_manager
+
+
+logger = logging.getLogger(__name__)
+
+MODE_TEXT = "text"
+MODE_CARD = "card"
+MODE_KAMI = "kami"
+MODE_CUSTOM = "custom"
+MODE_API = "api"
+DELIVERY_TIMING_AFTER_PAYMENT = "after_payment"
+_SAFE_LOG_CODE_RE = re.compile(r"[^a-z0-9_]+")
+_MAX_REALTIME_QUANTITY = 100
+
+
+def extract_order_id_from_url(url: str) -> Optional[str]:
+    """Extract a non-empty order identifier from a reminder URL."""
+
+    if not url:
+        return None
+    query = parse_qs(urlparse(url).query or "")
+    for key in ("orderId", "tradeId", "id"):
+        for value in query.get(key) or []:
+            normalized = str(value).strip()
+            if normalized:
+                return normalized
+    return None
+
+
+def extract_goods_id_from_url(url: str) -> Optional[str]:
+    """Extract a non-empty marketplace goods identifier from a reminder URL."""
+
+    if not url:
+        return None
+    query = parse_qs(urlparse(url).query or "")
+    for key in ("itemId", "id"):
+        for value in query.get(key) or []:
+            normalized = str(value).strip()
+            if normalized:
+                return normalized
+    return None
+
+
+def extract_peer_user_id_from_url(url: str) -> Optional[str]:
+    """Extract the chat peer identifier without logging or persisting the URL."""
+
+    if not url:
+        return None
+    query = parse_qs(urlparse(url).query or "")
+    for key in ("peerUserId", "buyerUserId", "toId"):
+        for value in query.get(key) or []:
+            normalized = str(value).strip()
+            if normalized:
+                return normalized
+    return None
+
+
+def extract_buy_quantity_from_msg(msg: dict) -> int:
+    complete_msg = msg.get("complete_msg") or msg.get("completeMsg") or {}
+    if isinstance(complete_msg, str):
+        try:
+            complete_msg = json.loads(complete_msg)
+        except (json.JSONDecodeError, TypeError):
+            complete_msg = {}
+    if isinstance(complete_msg, dict):
+        quantity = complete_msg.get("quantity") or complete_msg.get("buyQuantity")
+        try:
+            if quantity is not None:
+                return max(int(quantity), 1)
+        except (TypeError, ValueError):
+            pass
+
+    reminder = str(msg.get("reminderContent") or msg.get("reminder_content") or "")
+    match = re.search(r"[x×](\d+)", reminder)
+    if match:
+        try:
+            return max(int(match.group(1)), 1)
+        except (TypeError, ValueError):
+            pass
+    return 1
+
+
+def is_payment_message(msg: dict) -> bool:
+    """仅在买家真正付款后才返回 True，避免"拍下待付款"等未付款状态触发发货。
+
+    闲鱼订单系统通知（contentType=26）覆盖"拍下待付款""已付款""确认收货"等
+    多种状态。把所有 contentType=26 一律视为付款，会导致买家拍下未付款就发货，
+    并在真正付款后再发一次。这里显式排除"待付款"，并要求提醒文本明确表示已付款。
+    """
+    content_type = msg.get("contentType") or msg.get("content_type") or 0
+    try:
+        content_type_int = int(content_type)
+    except (TypeError, ValueError):
+        content_type_int = 0
+    reminder = str(msg.get("reminderContent") or msg.get("reminder_content") or "")
+
+    # "待付款"表示买家仅拍下尚未付款，必须跳过，避免未付款就发货
+    if "待付款" in reminder:
+        return False
+
+    # contentType=26 是订单类系统通知，但涵盖拍下/付款/收货等多个阶段，
+    # 只有提醒文本明确表示已付款或等待发货时才视为付款事件
+    if content_type_int == 26:
+        return "已付款" in reminder or "等待你发货" in reminder
+
+    return "等待你发货" in reminder or "已付款" in reminder
+
+
+def is_bargain_success_message(msg: dict) -> bool:
+    reminder = str(msg.get("reminderContent") or msg.get("reminder_content") or "")
+    return "小刀成功" in reminder or "我已成功小刀" in reminder
+
+
+def is_bargain_waiting_message(msg: dict) -> bool:
+    reminder = str(msg.get("reminderContent") or msg.get("reminder_content") or "")
+    return "小刀" in reminder and "待刀成" in reminder
+
+
+async def handle_incoming_message_for_delivery(
+    account_id: int,
+    msg: dict,
+) -> None:
+    """Process one stored WebSocket event through the durable state machine."""
+
+    payment_event = is_payment_message(msg)
+    if not payment_event and not is_bargain_success_message(msg):
+        return
+
+    logger.info("Realtime delivery event accepted accountId=%d", account_id)
+    async with async_session() as db:
+        try:
+            outcome = await _process_delivery(db, account_id, msg)
+            if outcome is not None and payment_event and not outcome.repeated:
+                try:
+                    from .notify_dispatcher import notify_new_order
+
+                    await notify_new_order(account_id, msg)
+                except Exception as exc:
+                    logger.warning(
+                        "New-order notification failed accountId=%d errorType=%s",
+                        account_id,
+                        type(exc).__name__,
+                    )
+            await db.commit()
+        except Exception as exc:
+            await db.rollback()
+            error_code = _safe_log_code(getattr(exc, "error_code", "delivery_handler_failed"))
+            logger.error(
+                "Realtime delivery stopped accountId=%d errorCode=%s errorType=%s",
+                account_id,
+                error_code,
+                type(exc).__name__,
+            )
+
+
+async def _process_delivery(
+    db: AsyncSession,
+    account_id: int,
+    msg: dict,
+) -> RealtimeDeliveryOutcome | None:
+    session_id = str(msg.get("sId") or msg.get("sid") or "").strip()
+    reminder_url = str(msg.get("reminderUrl") or msg.get("reminder_url") or "")
+    external_order_id = extract_order_id_from_url(reminder_url)
+    item_id = str(msg.get("xyGoodsId") or "").strip()
+    if not item_id:
+        item_id = extract_goods_id_from_url(reminder_url) or ""
+    peer_id = str(msg.get("senderUserId") or "").strip()
+    if not peer_id:
+        peer_id = extract_peer_user_id_from_url(reminder_url) or ""
+    source_event_id = _extract_source_event_id(msg)
+    if not source_event_id and external_order_id:
+        source_event_id = f"order:{external_order_id}"
+
+    missing = [
+        name
+        for name, value in (
+            ("session", session_id),
+            ("item", item_id),
+            ("peer", peer_id),
+            ("sourceEvent", source_event_id),
+        )
+        if not value
+    ]
+    if missing:
+        logger.warning(
+            "Realtime delivery denied accountId=%d missingContext=%s",
+            account_id,
+            ",".join(missing),
+        )
+        return None
+
+    quantity = extract_buy_quantity_from_msg(msg)
+    if quantity > _MAX_REALTIME_QUANTITY:
+        logger.warning(
+            "Realtime delivery denied accountId=%d errorCode=quantity_limit_exceeded",
+            account_id,
+        )
+        return None
+
+    event_key = build_realtime_delivery_event_key(
+        account_id=account_id,
+        external_order_id=external_order_id,
+        source_event_id=source_event_id,
+        session_id=session_id,
+        item_id=item_id,
+    )
+    rule = await resolve_realtime_delivery_rule(
+        db,
+        account_id=account_id,
+        external_goods_id=item_id,
+    )
+    mode = _normalize_delivery_mode(rule.get("delivery_mode") if rule else "unconfigured")
+    content = str((rule or {}).get("delivery_content") or "")
+    content = _render_delivery_content(
+        content,
+        buyer_name=str(msg.get("senderUserName") or ""),
+        external_order_id=external_order_id,
+    )
+    command = RealtimeDeliveryCommand(
+        event_key=event_key,
+        account_id=account_id,
+        external_order_id=external_order_id,
+        source_event_id=source_event_id,
+        session_id=session_id,
+        peer_id=peer_id,
+        item_id=item_id,
+        rule_id=_optional_int((rule or {}).get("id")),
+        delivery_mode=mode,
+        delivery_content=content,
+        quantity_requested=quantity,
+        card_group_id=_optional_int((rule or {}).get("card_group_id")),
+        auto_confirm_shipment=_truthy((rule or {}).get("auto_confirm_shipment")),
+    )
+    coordinator = RealtimeDeliveryCoordinator(
+        store=SqlRealtimeDeliveryStore(db),
+        gateway=XianyuRealtimeDeliveryGateway(),
+    )
+    outcome = await coordinator.execute(command)
+    logger.info(
+        "Realtime delivery state accountId=%d attemptId=%d state=%s errorCode=%s",
+        account_id,
+        outcome.attempt_id,
+        outcome.status,
+        _safe_log_code(outcome.error_code or "none"),
+    )
+    if outcome.status in {"failed", "unknown", "message_sent"}:
+        await _notify_realtime_delivery_attention(db, account_id, outcome)
+    return outcome
+
+
+async def resolve_realtime_delivery_rule(
+    db: AsyncSession,
+    *,
+    account_id: int,
+    external_goods_id: str,
+) -> Optional[dict]:
+    """Resolve a delivery rule without ever crossing the account seam."""
+
+    return await _match_delivery_rule(db, account_id, external_goods_id)
+
+
+async def _match_delivery_rule(
+    db: AsyncSession,
+    account_id: int,
+    external_goods_id: str,
+) -> Optional[dict]:
+    goods = await _find_goods_for_delivery(db, account_id, external_goods_id)
+    if goods:
+        goods_rule = await _load_goods_delivery_rule(db, goods)
+        if goods_rule:
+            return goods_rule
+
+    local_goods_id = int(goods["id"]) if goods and goods.get("id") is not None else 0
+    rows = (
+        await db.execute(
+            text(
+                """
+                SELECT id, account_id, goods_id, rule_name, delivery_mode,
+                       card_group_id, delivery_content, status
+                FROM delivery_rule
+                WHERE deleted = 0
+                  AND status = 1
+                  AND (account_id IS NULL OR account_id = :account_id)
+                  AND (goods_id IS NULL OR goods_id = 0 OR goods_id = :goods_id)
+                ORDER BY
+                  CASE
+                    WHEN account_id = :account_id AND goods_id = :goods_id THEN 0
+                    WHEN account_id = :account_id AND (goods_id IS NULL OR goods_id = 0) THEN 1
+                    WHEN account_id IS NULL AND goods_id = :goods_id THEN 2
+                    ELSE 3
+                  END,
+                  id DESC
+                LIMIT 1
+                """
+            ),
+            {"account_id": account_id, "goods_id": local_goods_id},
+        )
+    ).mappings().all()
+    if not rows:
+        return None
+    rule = dict(rows[0])
+    rule["delivery_mode"] = _normalize_delivery_mode(rule.get("delivery_mode"))
+    rule["auto_confirm_shipment"] = 0
+    return rule
+
+
+async def _find_goods_for_delivery(
+    db: AsyncSession,
+    account_id: int,
+    external_goods_id: str,
+) -> Optional[dict]:
+    if not external_goods_id:
+        return None
+    row = (
+        await db.execute(
+            text(
+                """
+                SELECT id, account_id, external_goods_id, title
+                FROM xianyu_goods
+                WHERE deleted = 0
+                  AND account_id = :account_id
+                  AND external_goods_id = :external_goods_id
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ),
+            {
+                "account_id": account_id,
+                "external_goods_id": external_goods_id,
+            },
+        )
+    ).mappings().first()
+    return dict(row) if row else None
+
+
+async def _load_goods_delivery_rule(
+    db: AsyncSession,
+    goods: dict,
+) -> Optional[dict]:
+    row = (
+        await db.execute(
+            text(
+                """
+                SELECT id, goods_id, config_json
+                FROM delivery_goods_config
+                WHERE goods_id = :goods_id
+                  AND deleted = 0
+                LIMIT 1
+                """
+            ),
+            {"goods_id": goods.get("id")},
+        )
+    ).mappings().first()
+    if not row:
+        return None
+
+    config = _json_object(row.get("config_json"))
+    timing_config = config.get("payDelivery")
+    if not isinstance(timing_config, dict) or not _truthy(timing_config.get("enabled")):
+        return None
+
+    mode = _normalize_delivery_mode(timing_config.get("mode"))
+    header = str(timing_config.get("header") or "")
+    footer = str(timing_config.get("footer") or "")
+    source_id = timing_config.get("sourceId")
+    source_title = str(timing_config.get("sourceTitle") or "")
+    if mode == MODE_TEXT:
+        content = str(timing_config.get("content") or "")
+        if source_id:
+            source = await _load_text_source(db, source_id)
+            if source:
+                content = content or str(source.get("content") or "")
+                source_title = source_title or str(source.get("title") or "")
+        delivery_content = _build_delivery_content(header, content, footer)
+        if not delivery_content.strip():
+            return None
+    elif mode == MODE_CARD:
+        card_template = str(timing_config.get("cardTemplate") or "{卡密}")
+        delivery_content = _build_delivery_content(header, card_template, footer)
+    else:
+        # Persist the retired mode as failed; never read or call its URL fields.
+        delivery_content = ""
+
+    return {
+        "id": row.get("id"),
+        "goods_id": goods.get("id"),
+        "delivery_mode": mode,
+        "delivery_content": delivery_content,
+        "delivery_timing": DELIVERY_TIMING_AFTER_PAYMENT,
+        "source_id": source_id,
+        "source_title": source_title,
+        "card_group_id": timing_config.get("cardGroupId"),
+        "auto_confirm_shipment": timing_config.get("autoConfirmShipment")
+        or timing_config.get("auto_confirm_shipment")
+        or 0,
+    }
+
+
+async def _load_text_source(db: AsyncSession, source_id: Any) -> Optional[dict]:
+    row = (
+        await db.execute(
+            text(
+                """
+                SELECT id, title, content
+                FROM delivery_text_source
+                WHERE id = :source_id
+                  AND deleted = 0
+                LIMIT 1
+                """
+            ),
+            {"source_id": source_id},
+        )
+    ).mappings().first()
+    return dict(row) if row else None
+
+
+async def _ensure_ws_connected(account_id: int, timeout: float = 12.0) -> bool:
+    """确保账号的 WebSocket 已连接，未连接时自动从 DB 重启并等待注册完成。
+
+    用于手动发货等需要即时发送消息的场景，避免因 WS 临时断开导致发货直接失败。
+    """
+    client = ws_manager.get_client(account_id)
+    if client and client.is_connected:
+        return True
+
+    logger.info("手动发货前 WS 未连接，尝试自动重启 accountId=%d", account_id)
+    try:
+        restarted = await ws_manager.restart_account(account_id)
+    except Exception:
+        logger.error("手动发货前 WS 重启异常 accountId=%d", account_id)
+        return False
+    if not restarted:
+        logger.warning("手动发货前 WS 重启失败（账号不存在或凭据缺失）accountId=%d", account_id)
+        return False
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        await asyncio.sleep(0.5)
+        client = ws_manager.get_client(account_id)
+        if client and client.is_connected:
+            logger.info("手动发货前 WS 自动重连成功 accountId=%d", account_id)
+            return True
+    logger.warning("手动发货前 WS 自动重连超时 accountId=%d", account_id)
+    return False
+
+
+async def send_delivery_message_result(
+    account_id: int,
+    s_id: str,
+    buyer_user_id: str,
+    content: str,
+) -> dict:
+    """Send once while preserving confirmed/failed/unknown ACK semantics."""
+
+    client = ws_manager.get_client(account_id)
+    if not client or not client.is_connected:
+        if not await _ensure_ws_connected(account_id):
+            return {
+                "status": "failed",
+                "errorCode": "websocket_unavailable",
+                "message": "账号消息连接不可用，请等待重连后重试",
+                "retrySafe": True,
+            }
+        client = ws_manager.get_client(account_id)
+    if not client._sid:
+        return {
+            "status": "failed",
+            "errorCode": "websocket_not_registered",
+            "message": "账号消息连接尚未完成注册，请稍后重试",
+            "retrySafe": True,
+        }
+
+    cid = s_id if s_id.endswith("@goofish") else f"{s_id}@goofish"
+    to_id = (
+        buyer_user_id
+        if buyer_user_id.endswith("@goofish")
+        else f"{buyer_user_id}@goofish"
+    )
+    result = await client.send_text_message(cid=cid, to_id=to_id, text=content)
+    if not isinstance(result, dict):
+        return {
+            "status": "unknown",
+            "errorCode": "message_ack_unknown",
+            "message": "发送结果未确认，请先在闲鱼 App 核对，避免重复发送",
+            "retrySafe": False,
+        }
+    try:
+        code = int(result.get("code", 500))
+    except (TypeError, ValueError):
+        code = 500
+    if code == 200:
+        return {"status": "confirmed", "retrySafe": False}
+    if code == 503 and not result.get("mid") and not result.get("deliveryUnknown"):
+        return {
+            "status": "failed",
+            "errorCode": "websocket_unavailable",
+            "message": "账号消息连接不可用，请等待重连后重试",
+            "retrySafe": True,
+        }
+    if result.get("deliveryUnknown") or (code >= 500 and not result.get("mid")):
+        return {
+            "status": "unknown",
+            "errorCode": "message_ack_unknown",
+            "message": "发送结果未确认，请先在闲鱼 App 核对，避免重复发送",
+            "retrySafe": False,
+        }
+    return {
+        "status": "failed",
+        "errorCode": "message_rejected",
+        "message": "平台明确拒绝买家消息，请检查会话与账号状态后重试",
+        "retrySafe": True,
+    }
+
+
+async def _send_delivery_message(
+    account_id: int,
+    s_id: str,
+    buyer_user_id: str,
+    content: str,
+) -> bool:
+    result = await send_delivery_message_result(account_id, s_id, buyer_user_id, content)
+    return result.get("status") == "confirmed"
+
+
+async def _notify_realtime_delivery_attention(
+    db: AsyncSession,
+    account_id: int,
+    outcome: RealtimeDeliveryOutcome,
+) -> None:
+    try:
+        from .automation_runtime import insert_notification
+
+        message = (
+            "实时自动发货需要人工核对。"
+            f"本地尝试编号：{outcome.attempt_id}；"
+            f"状态：{outcome.status}；"
+            f"错误代码：{_safe_log_code(outcome.error_code or 'review_required')}。"
+            "请在闲鱼 App 核对消息与订单状态，未知结果不要重复发送。"
+        )
+        await insert_notification(
+            db,
+            None,
+            "自动发货核对提醒",
+            message,
+            "自动发货核对提醒",
+            "warn",
+        )
+    except Exception as exc:
+        logger.warning(
+            "Realtime delivery reminder failed accountId=%d attemptId=%d errorType=%s",
+            account_id,
+            outcome.attempt_id,
+            type(exc).__name__,
+        )
+
+
+def _extract_source_event_id(msg: dict) -> str:
+    for key in ("pnmId", "messageId", "msgId", "mid", "eventId"):
+        value = str(msg.get(key) or "").strip()
+        if value:
+            return value
+    complete = msg.get("complete_msg") or msg.get("completeMsg")
+    if isinstance(complete, str):
+        try:
+            complete = json.loads(complete)
+        except (json.JSONDecodeError, TypeError):
+            complete = None
+    if isinstance(complete, dict):
+        for key in ("pnmId", "messageId", "msgId", "mid", "eventId"):
+            value = str(complete.get(key) or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def _render_delivery_content(
+    content: str,
+    *,
+    buyer_name: str,
+    external_order_id: str | None,
+) -> str:
+    return (
+        str(content or "")
+        .replace("{buyerUserName}", buyer_name or "买家")
+        .replace("{orderId}", external_order_id or "")
+        .replace("{goodsTitle}", "")
+        .replace("{deliveryTime}", time.strftime("%Y-%m-%d %H:%M:%S"))
+    )
+
+
+def _build_delivery_content(header: str, content: str, footer: str) -> str:
+    return "\n".join(
+        part
+        for part in (
+            str(header or "").strip(),
+            str(content or "").strip(),
+            str(footer or "").strip(),
+        )
+        if part
+    )
+
+
+def _json_object(value: Any) -> dict:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return {}
+    try:
+        loaded = json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _normalize_delivery_mode(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {MODE_CARD, MODE_KAMI}:
+        return MODE_CARD
+    if normalized == MODE_TEXT:
+        return MODE_TEXT
+    return normalized or "unconfigured"
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        return int(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_log_code(value: Any) -> str:
+    normalized = _SAFE_LOG_CODE_RE.sub("_", str(value or "").lower()).strip("_")
+    return (normalized or "unknown")[:64]

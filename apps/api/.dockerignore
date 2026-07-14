@@ -1,0 +1,11 @@
+__pycache__
+*.py[cod]
+.pytest_cache
+.coverage
+htmlcov
+tests
+test*.py
+uploads
+*.log
+*-audit-result.json
+.env*

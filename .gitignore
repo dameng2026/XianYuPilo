@@ -1,0 +1,42 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+/secrets/
+node_modules/
+dist/
+build/
+uploads/images/*
+!uploads/images/.gitkeep
+# Local API uploads and homepage content are runtime data, not source assets.
+apps/uploads/*
+!apps/uploads/.gitkeep
+*.log
+.DS_Store
+.idea/
+.vscode/
+*.jar
+*.class
+.pytest_cache/
+.pytest_tmp/
+.coverage
+htmlcov/
+*-audit-result.json
+.__atomic-write*
+.venv/
+venv/
+.tmp-api-venv/
+.tmp/
+
+# Local runtime data and browser-test artifacts must never be published.
+.playwright-cli/
+dogfood-output/
+output/
+apps/api/uploads/
+apps/api/screenshots/
+apps/web/mobile-*.png
+
+# Internal migration/provenance working papers are archived outside the public tree.
+docs/handoffs/
+docs/specs/
+HANDOFF_EXECUTION_DOC.md

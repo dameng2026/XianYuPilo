@@ -1,0 +1,95 @@
+/**
+ * 将后端返回的技术性错误信息转换为用户友好的中文提示。
+ *
+ * 用法：
+ *   import { friendlyError } from '../utils/friendlyError.js'
+ *   catch (e) { error.value = friendlyError(e) }
+ *
+ * 已处理的错误类型：
+ * 1. 闲鱼 API 错误码（FAIL_SYS_USER_VALIDATE / RGV587_ERROR / FAIL_BIZ_* 等）
+ * 2. Java 异常堆栈（包含 "Exception:" 的字符串）
+ * 3. 纯英文技术错误（如 "Cannot read property..."）
+ * 4. HTTP 状态码相关错误（由 request.js 已处理，这里做兜底）
+ */
+
+// 闲鱼/淘宝 API 错误码 → 友好提示
+const XIANYU_ERROR_MAP = {
+  'FAIL_SYS_USER_VALIDATE': '触发了闲鱼安全验证，请稍后重试或在闲鱼 App 中完成验证',
+  'RGV587_ERROR': '闲鱼风控拦截，请稍后重试',
+  'FAIL_BIZ_ITEM_EDIT_INVALID_MAP_LOCATION': '发布地址信息不完整，请补全省市区、GPS 和 POI 信息',
+  'FAIL_BIZ_ITEM_TITLE_REQUIRED': '商品标题不能为空',
+  'FAIL_BIZ_ITEM_DESC_REQUIRED': '商品描述不能为空',
+  'FAIL_BIZ_ITEM_PRICE_REQUIRED': '商品价格不能为空',
+  'FAIL_BIZ_ITEM_IMAGE_REQUIRED': '请至少上传一张商品图片',
+  'FAIL_BIZ_USER_NOT_LOGIN': '闲鱼登录已失效，请重新扫码登录',
+  'FAIL_SYS_ILLEGAL_ACCESS': '访问被拒绝，请稍后重试',
+  'FAIL_SYS_PARAM_ERROR': '请求参数有误，请检查后重试',
+  'no_available_account': '暂无可用账号，请稍后重试或添加新账号',
+}
+
+// 关键词 → 友好提示（用于模糊匹配）
+const KEYWORD_PATTERNS = [
+  { pattern: /cookie.*过期|cookie.*invalid|登录已失效/i, message: '登录已失效，请重新扫码或更新 Cookie' },
+  { pattern: /network|econnrefused|etimedout|econnreset/i, message: '网络连接失败，请检查网络或服务状态' },
+  { pattern: /timeout|超时/i, message: '请求超时，请稍后重试' },
+  { pattern: /not found|404|资源不存在/i, message: '请求的资源不存在' },
+  { pattern: /forbidden|403|无权限|权限不足/i, message: '暂无权限执行此操作' },
+  { pattern: /rate.?limit|限流|频繁/i, message: '操作过于频繁，请稍后再试' },
+  { pattern: /server error|500|502|503|504|服务异常|系统繁忙/i, message: '服务暂时不可用，请稍后重试' },
+]
+
+/**
+ * 判断字符串是否为纯英文技术错误（如 Java 异常、JS 错误）
+ */
+function isTechnicalMessage(msg) {
+  if (typeof msg !== 'string') return false
+  // 包含中文，认为不是技术错误
+  if (/[\u4e00-\u9fa5]/.test(msg)) return false
+  // 包含 Exception / Error / at xxx.yyy 堆栈特征
+  if (/exception|error|stack|trace|undefined|null|cannot|failed to/i.test(msg)) return true
+  // 下划线大写错误码
+  if (/^[A-Z][A-Z0-9_]+$/.test(msg.trim())) return true
+  return false
+}
+
+/**
+ * 从错误对象中提取原始消息字符串
+ */
+function extractRawMessage(err) {
+  if (!err) return ''
+  if (typeof err === 'string') return err
+  return err.message || err.msg || (typeof err === 'object' ? JSON.stringify(err) : String(err))
+}
+
+/**
+ * 将错误转换为用户友好的提示
+ * @param {Error|object|string} err 错误对象
+ * @param {string} fallback 兜底提示文案（当无法识别错误时使用）
+ * @returns {string} 友好的错误提示
+ */
+export function friendlyError(err, fallback = '操作失败，请稍后重试') {
+  const raw = extractRawMessage(err)
+  if (!raw) return fallback
+
+  // 1. 精确匹配闲鱼错误码
+  const trimmed = raw.trim()
+  if (XIANYU_ERROR_MAP[trimmed]) return XIANYU_ERROR_MAP[trimmed]
+
+  // 2. 模糊匹配关键词
+  for (const { pattern, message } of KEYWORD_PATTERNS) {
+    if (pattern.test(raw)) return message
+  }
+
+  // 3. 包含闲鱼错误码（如 "FAIL_SYS_USER_VALIDATE: xxx"）
+  for (const code of Object.keys(XIANYU_ERROR_MAP)) {
+    if (raw.includes(code)) return XIANYU_ERROR_MAP[code]
+  }
+
+  // 4. 技术性错误（纯英文、异常堆栈）→ 用兜底提示
+  if (isTechnicalMessage(raw)) {
+    return fallback
+  }
+
+  // 5. 已是中文友好提示，原样返回
+  return raw
+}

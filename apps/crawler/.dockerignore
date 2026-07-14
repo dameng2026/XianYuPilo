@@ -1,0 +1,7 @@
+node_modules
+dist
+test
+*.log
+.env*
+npm-debug.log*
+crawler-screenshots

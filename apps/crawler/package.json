@@ -1,0 +1,32 @@
+{
+  "name": "xianyu-crawler",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Playwright solver service for Xianyu Assistant",
+  "main": "dist/server.js",
+  "type": "module",
+  "engines": {
+    "node": "22.23.1",
+    "npm": "10.9.8"
+  },
+  "packageManager": "npm@10.9.8",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "dev:local": "node --env-file=../../.env ./node_modules/tsx/dist/cli.mjs watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "cors": "2.8.6",
+    "express": "4.22.2",
+    "playwright": "1.61.1"
+  },
+  "devDependencies": {
+    "@types/cors": "2.8.19",
+    "@types/express": "4.17.25",
+    "@types/node": "22.20.0",
+    "tsx": "4.23.0",
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
+  }
+}

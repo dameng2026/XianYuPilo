@@ -1,0 +1,21 @@
+# Canonical source bytes keep release digests reproducible on every checkout.
+* text=auto eol=lf
+
+# Windows command wrappers are consumed by cmd.exe.
+*.bat text eol=crlf
+
+# Never run media, fonts, archives, or generated evidence through text filters.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.sigstore.json text eol=lf
