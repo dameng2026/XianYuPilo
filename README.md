@@ -147,13 +147,26 @@ xianyu-assistant-opensource/
 
    `.env` 只填写受保护的密钥文件路径，不填写密钥值。`./secrets` 目录建议权限为 `0700`，文件为 `0600`；每个密码/密钥必须独立随机生成，不能复用模板、开发或其他系统秘密。
 
-3. **启动所有服务**
+3. **启动所有服务**（任选一种）
 
-   ```bash
-   sh ./start.sh
-   ```
+   - **拉取预构建镜像**（推荐，免本地构建）：每次推送到 `main` 分支时 GitHub Actions 会自动构建 `api`/`web`/`crawler` 镜像并发布到 GHCR，直接拉取即可运行。
 
-   Windows 使用 `start.bat`。脚本会依次执行秘密安全校验、`docker compose config --quiet`、镜像构建、容器健康等待和 Web 健康探测；任一必填秘密不安全时会拒绝启动。
+     ```bash
+     docker compose pull
+     docker compose up -d
+     ```
+
+     镜像源与命名空间可在 `.env` 的 `Prebuilt Docker images` 段覆盖；要切回本地源码构建用 `docker compose up -d --build`。
+
+     > 镜像以多架构 manifest 发布（`linux/amd64` + `linux/arm64`），Intel Mac、Apple Silicon Mac（M1/M2/M3/M4）和 x86 服务器均可由 `docker compose pull` 自动派发对应架构的原生镜像，无需 QEMU 模拟。
+
+   - **本地源码构建**：适用于自定义修改或离线场景。
+
+     ```bash
+     sh ./start.sh
+     ```
+
+     Windows 使用 `start.bat`。脚本会依次执行秘密安全校验、`docker compose config --quiet`、镜像构建、容器健康等待和 Web 健康探测；任一必填秘密不安全时会拒绝启动。
 
    Compose 会先运行一次性 `migrate` 服务，再允许 API 和 Worker 启动；新库与旧库都走同一个带历史记录和 MySQL 单实例锁的版本化 runner。维护窗口、备份、状态检查和回滚兼容流程见 [`apps/api/migrations/README.md`](apps/api/migrations/README.md)。
 

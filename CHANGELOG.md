@@ -1,0 +1,60 @@
+# 更新日志
+
+本项目所有显著变更均记录于此文件。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，遵循语义化版本 [SemVer](https://semver.org/lang/zh-CN/)。
+
+- **主版本号**：不兼容的破坏性变更
+- **次版本号**：向下兼容的新功能
+- **修订号**：向下兼容的问题修复
+
+## [Unreleased]
+
+## [v1.1.0] - 2026-07-15
+
+### 新增
+- **Docker 镜像自动构建与发布**：每次推送到 `main` 分支时，GitHub Actions 自动构建 `api`/`web`/`crawler` 镜像并推送至 GHCR（`ghcr.io/xianyu-assistant-opensource/xianyu-assistant-{api,web,crawler}`），支持 `latest` 与 git 短 SHA 双标签
+- **一键拉取预构建镜像运行**：`docker compose pull && docker compose up -d`，无需本地源码构建
+- **镜像源可覆盖**：通过 `.env` 的 `IMAGE_NAMESPACE`/`API_IMAGE`/`WEB_IMAGE`/`CRAWLER_IMAGE` 切换命名空间或镜像源
+- **更新日志机制**：新增 `CHANGELOG.md`，并落地为项目规则，每次上传追加版本记录
+
+### 变更
+- `docker-compose.yml` 中 `api`/`migrate`/`crawler`/`web` 服务的 `image` 默认值由本地标签改为 GHCR 路径，同时保留 `build` 字段以便 `--build` 切回本地构建
+
+### 修复
+- **商品同步接口异常处理**：`/items/sync-progress/{sync_id}` 与 `/items/syncing/{account_id}` 两个端点增加 try/except 兜底，避免数据库查询或内存进度读取异常时直接返回 500，改为记录日志并返回统一错误响应
+
+## [v1.0.0] - 2026-07-14
+
+闲鱼助手开源版首个正式发布版本。
+
+### 功能亮点
+- 🧑‍💼 **闲鱼账号管理** — 多账号接入、二维码登录、状态监控
+- 📦 **商品管理与发布** — 上下架、编辑、批量操作、分类
+- 🧾 **订单管理** — 同步、跟踪、状态流转
+- 💬 **在线消息** — 实时会话、WebSocket 长连接、分页回溯
+- 🚚 **自动发货** — 卡密自动交付、实时与手动双通道
+- 🎫 **卡密仓库** — 库存管理、去重、交付记录
+- 🤖 **自动回复** — AI 驱动、知识库增强、人设与规则可配
+- ⏰ **定时任务** — 调度执行、心跳与租约保护
+- 📝 **操作日志** — 审计留痕、保留期管理
+- 🔔 **通知渠道** — 持久化防重复测试发送，未知结果只能人工确认关闭
+- 📚 **RAG 知识库** — 向量检索增强回复
+- ⚙️ **系统配置** — 通用模型、向量模型、RAG、高德地图、商业版桥接状态
+- 🧩 **Crawler 滑块求解** — 由 API 同会话维护的二维码登录
+- 🏠 **首页运营** — 轮播、公告、文字广告、广告申请、关于我们
+- 🔗 **反馈建议** — 向我们反馈功能建议
+
+### 技术架构
+- 后端 API：Python 3.11 + FastAPI + SQLAlchemy 2.0
+- 前端 Web：Vue 3 + Vite
+- 爬虫服务：Node.js 22 + TypeScript + Playwright
+- 数据库：MySQL 8.0
+- 缓存：Redis 7
+- 反向代理：Nginx
+- 部署方式：Docker Compose
+
+### 安全特性
+- 全套生产秘密通过文件注入（`./secrets/*`，权限 `0600`）
+- MySQL 最小权限双账号（迁移账号与运行账号分离）
+- 容器 `read_only` + `cap_drop: ALL` + `no-new-privileges` 加固
+- JWT 认证、Cookie 加密、CORS 白名单、登录限流
+- 审计日志与保留期管理

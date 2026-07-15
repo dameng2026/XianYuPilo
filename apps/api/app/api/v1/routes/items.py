@@ -1060,32 +1060,36 @@ async def get_sync_progress(
     db: AsyncSession = Depends(get_db),
     _: None = Depends(verify_internal_token),
 ):
-    from ....services.xianyu_goods_sync import get_sync_progress as _get_progress
-    progress = _get_progress(sync_id)
-    if progress:
-        return ResultObject.success(progress)
+    try:
+        from ....services.xianyu_goods_sync import get_sync_progress as _get_progress
+        progress = _get_progress(sync_id)
+        if progress:
+            return ResultObject.success(progress)
 
-    result = await db.execute(select(XianyuGoodsSyncTask).where(XianyuGoodsSyncTask.sync_id == sync_id, XianyuGoodsSyncTask.deleted == 0))
-    task = result.scalar_one_or_none()
-    if not task:
-        return ResultObject.success({"progress": 0, "status": "not_found"})
-    return ResultObject.success({
-        "sync_id": task.sync_id,
-        "account_id": task.account_id,
-        "status": task.status,
-        "progress": task.progress or 0,
-        "total": task.total_count or 0,
-        "new": task.new_count or 0,
-        "updated": task.updated_count or 0,
-        "skipped": task.skipped_count or 0,
-        "off_shelf": task.off_shelf_count or 0,
-        "detail_synced": task.detail_synced_count or 0,
-        "duration_seconds": task.duration_seconds or 0,
-        "error": task.error_message,
-        "started_at": task.started_time.isoformat() if task.started_time else None,
-        "finished_at": task.finished_time.isoformat() if task.finished_time else None,
-        "source": "db",
-    })
+        result = await db.execute(select(XianyuGoodsSyncTask).where(XianyuGoodsSyncTask.sync_id == sync_id, XianyuGoodsSyncTask.deleted == 0))
+        task = result.scalar_one_or_none()
+        if not task:
+            return ResultObject.success({"progress": 0, "status": "not_found"})
+        return ResultObject.success({
+            "sync_id": task.sync_id,
+            "account_id": task.account_id,
+            "status": task.status,
+            "progress": task.progress or 0,
+            "total": task.total_count or 0,
+            "new": task.new_count or 0,
+            "updated": task.updated_count or 0,
+            "skipped": task.skipped_count or 0,
+            "off_shelf": task.off_shelf_count or 0,
+            "detail_synced": task.detail_synced_count or 0,
+            "duration_seconds": task.duration_seconds or 0,
+            "error": task.error_message,
+            "started_at": task.started_time.isoformat() if task.started_time else None,
+            "finished_at": task.finished_time.isoformat() if task.finished_time else None,
+            "source": "db",
+        })
+    except Exception:
+        logger.error("获取同步进度失败 sync_id=%s", sync_id, exc_info=True)
+        return ResultObject.internal_error()
 
 
 @router.get("/syncing/{account_id}")
@@ -1094,16 +1098,20 @@ async def is_syncing(
     db: AsyncSession = Depends(get_db),
     _: None = Depends(verify_internal_token),
 ):
-    from ....services.xianyu_goods_sync import is_account_syncing as _is_syncing
-    if _is_syncing(account_id):
-        return ResultObject.success(True)
-    query = select(func.count()).select_from(XianyuGoodsSyncTask).where(
-        XianyuGoodsSyncTask.account_id == account_id,
-        XianyuGoodsSyncTask.deleted == 0,
-        XianyuGoodsSyncTask.status.in_(["queued", "running"]),
-    )
-    result = await db.execute(query)
-    return ResultObject.success((result.scalar() or 0) > 0)
+    try:
+        from ....services.xianyu_goods_sync import is_account_syncing as _is_syncing
+        if _is_syncing(account_id):
+            return ResultObject.success(True)
+        query = select(func.count()).select_from(XianyuGoodsSyncTask).where(
+            XianyuGoodsSyncTask.account_id == account_id,
+            XianyuGoodsSyncTask.deleted == 0,
+            XianyuGoodsSyncTask.status.in_(["queued", "running"]),
+        )
+        result = await db.execute(query)
+        return ResultObject.success((result.scalar() or 0) > 0)
+    except Exception:
+        logger.error("检查同步状态失败 account_id=%d", account_id, exc_info=True)
+        return ResultObject.internal_error()
 
 
 # ==================== 内部辅助函数 ====================
