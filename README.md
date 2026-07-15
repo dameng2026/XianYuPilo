@@ -249,9 +249,15 @@ python scripts/production_ops.py --env-file .env stop
 
 欢迎提交 Issue 与 Pull Request。提交前请先阅读 [`CONTRIBUTING.md`](CONTRIBUTING.md)，并确保本地 `verify-local.bat`（或对应脚本）通过。
 
-## 📄 许可证
+## 🧸 特别鸣谢
 
-本仓库尚未包含 `LICENSE` 文件。在权利人选择并提交许可证之前，代码按“源码可见、保留所有权利”处理，不授予任何开源或商业使用许可。如需商业授权，请先联系项目权利人。
+本项目在开发过程中参考了以下开源项目，特此致谢：
+
+- [xianyuapis](https://github.com/IAMLZY2018/xianyuapis) — 闲鱼相关 API 的实现思路与协议参考。
+
+## 📄 许可证：Apache-2.0 许可证
+
+本项目采用 [Apache License 2.0](LICENSE) 授权。任何人可在遵守该许可证条款的前提下自由使用、修改和分发本仓库代码。
 
 ---
 
@@ -261,7 +267,7 @@ python scripts/production_ops.py --env-file .env stop
 
 <div align="center">
 
-![赞助码](sponsorship/qr.png)
+![赞助码](screenshots/qr.png)
 
 </div>
 
@@ -273,7 +279,7 @@ python scripts/production_ops.py --env-file .env stop
 
 <div align="center">
 
-![微信群](sponsorship/wechat-group.png)
+![微信群](screenshots/wechat-group.png)
 
 </div>
 
