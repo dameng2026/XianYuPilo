@@ -1477,6 +1477,15 @@ onBeforeUnmount(() => {
   color: #ef4444;
 }
 
+/* 中宽屏（1501-1680px）：4 列下功能卡片过窄，长描述与
+   "点击进入 XXX" 文本大量换行溢出，降为 3 列保证文字留白 */
+@media (max-width: 1680px) {
+  .quick-start-grid,
+  .feature-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 1500px) {
   .quick-start-grid,
   .feature-grid {
