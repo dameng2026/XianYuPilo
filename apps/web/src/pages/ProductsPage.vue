@@ -124,6 +124,7 @@
           <strong>批量删除完成：</strong>
           <span>成功 <b>{{ batchDeleteState.result.success }}</b> / 失败 <b>{{ batchDeleteState.result.failed.length }}</b></span>
           <button v-if="batchDeleteState.result.failed.length" class="link" style="margin-left:8px" :title="batchDeleteState.result.failed.map(f => `${f.name}: ${f.reason}`).join('\n')">查看失败详情</button>
+          <button v-if="batchDeleteState.result.warnings && batchDeleteState.result.warnings.length" class="link" style="margin-left:8px" :title="batchDeleteState.result.warnings.map(w => `${w.name}: ${w.reason}`).join('\n')">需人工核对({{ batchDeleteState.result.warnings.length }})</button>
           <button class="link" style="margin-left:8px" @click="batchDeleteState.result = null">关闭</button>
         </div>
         <div class="table-scroll-wrap">
@@ -908,7 +909,13 @@ async function loadGoodsStats() {
     const res = await getGoodsStats(params)
     const data = res?.data ?? res
     const requiredStats = ['total', 'onSale', 'offShelfOrDraft', 'autoDeliveryOn', 'autoReplyAccounts']
-    if (!data || requiredStats.some(key => !Number.isFinite(Number(data[key])))) throw new Error('商品统计响应结构无效')
+    if (!data || typeof data !== 'object' || Array.isArray(data)
+      || requiredStats.some(key => {
+        const num = Number(data[key])
+        return data[key] === null || data[key] === undefined || data[key] === '' || !Number.isFinite(num) || num < 0
+      })) {
+      throw new Error('商品统计响应不完整')
+    }
     goodsStats.value = {
       total: Number(data.total),
       onSale: Number(data.onSale),
@@ -951,13 +958,13 @@ function nextSyncPage(){ if(syncQuery.current * syncQuery.size < syncTaskTotal.v
 async function init(){
   try {
     await loadAccountsData()
-    await loadSyncTasks()
-    loadGoodsStats()
-    // 进入页面后自动触发闲鱼商品同步（无需用户手动点击）
-    autoTriggerSync()
-  } catch(e){
-    showNotice('error', e.message || '初始化失败')
+  } catch {
+    // 账号加载失败不阻塞：商品列表/统计/任务历史仍可独立加载
   }
+  try { await loadSyncTasks() } catch(e) { if (import.meta.env.DEV) console.warn('[ProductsPage] 同步任务历史加载失败', e) }
+  try { loadGoodsStats() } catch(e) { if (import.meta.env.DEV) console.warn('[ProductsPage] 商品统计加载失败', e) }
+  // 进入页面后自动触发闲鱼商品同步（无需用户手动点击）
+  autoTriggerSync()
 }
 function showAllProducts() {
   // 用户点击"查看全部商品"时清除仅展示同步结果的限制，加载全部商品
@@ -1426,6 +1433,7 @@ async function batchDeleteProducts() {
   batchDeleteState.result = null
 
   const failed = []
+  const warnings = []
   let success = 0
 
   for (const row of selectedRows) {
@@ -1445,10 +1453,21 @@ async function batchDeleteProducts() {
               xyGoodsId,
               idempotencyKey: remoteDeleteKey(item),
             })
-            if (response?.data?.status === 'confirmed') success++
-            else failed.push({ name: row.name, reason: response?.data?.message || '删除尚未确认完成' })
+            const status = response?.data?.status
+            if (status === 'confirmed') {
+              success++
+            } else if (status === 'remote_confirmed') {
+              warnings.push({ name: row.name, reason: response?.data?.message || '平台已删除，本地收尾未完成' })
+            } else {
+              failed.push({ name: row.name, reason: response?.data?.message || '删除尚未确认完成' })
+            }
           } catch (e) {
-            failed.push({ name: row.name, reason: remoteDeleteFailure(e).message })
+            const failure = remoteDeleteFailure(e)
+            if (failure.type === 'warn') {
+              warnings.push({ name: row.name, reason: failure.message })
+            } else {
+              failed.push({ name: row.name, reason: failure.message })
+            }
           }
         } else {
           failed.push({ name: row.name, reason: '缺少账号或闲鱼商品ID' })
@@ -1462,7 +1481,7 @@ async function batchDeleteProducts() {
 
   batchDeleteState.active = false
   batchDeleteState.current = ''
-  batchDeleteState.result = { success, failed }
+  batchDeleteState.result = { success, failed, warnings }
   batchDeleting.value = false
   selectedKeys.value = []
 
@@ -1711,7 +1730,7 @@ async function syncAllAccounts() {
       const label = accountName(acc) || `账号 ${acc.id}`
       autoSyncState.accountIndex = i + 1
       autoSyncState.accountLabel = label
-      autoSyncState.progress = 0
+      // 不重置 progress 为 0，保留上一账号进度作为起点，避免进度回退闪烁
       try {
         const res = await refreshItems({ xianyuAccountId: Number(acc.id) })
         const syncId = res.data?.syncId || res.data?.sync_id
@@ -1767,60 +1786,81 @@ async function syncAllAccounts() {
 
 async function pollSyncProgress(syncId, isAuto = false) {
   let retries = 0
+  let consecutiveQueryFailures = 0
   const maxRetries = 120
+  const knownStatuses = ['queued', 'running', 'completed', 'failed', 'cancelled', 'not_found']
   while (retries < maxRetries && !syncPollCanceled) {
     await new Promise(r => setTimeout(r, 2000))
     if (syncPollCanceled) return null
     retries++
+    let res
     try {
-      const res = await getSyncProgress(syncId)
-      const progress = res.data || {}
-      const pct = Number(progress.progress || 0)
-      syncTask.value = { id: syncId, status: progress.status || 'running', progress: pct }
-      // 单账号自动同步场景下更新顶部横幅进度；多账号场景由 syncAllAccounts 自行管理
-      if (isAuto) {
-        autoSyncState.progress = pct
-        if (progress.total) autoSyncState.summary.total = progress.total
-        if (progress.new) autoSyncState.summary.new = progress.new
-        if (progress.updated) autoSyncState.summary.updated = progress.updated
-        if (progress.off_shelf) autoSyncState.summary.offShelf = progress.off_shelf
+      res = await getSyncProgress(syncId)
+      consecutiveQueryFailures = 0
+    } catch (e) {
+      consecutiveQueryFailures++
+      if (consecutiveQueryFailures >= 3) {
+        throw new Error(`同步状态连续查询失败：${e?.message || '服务不可用'}`)
       }
-      if (progress.status === 'completed') {
-        // 同步成功，更新最后同步时间戳
-        localStorage.setItem(LS_LAST_SYNC_TIME, String(Date.now()))
-        localStorage.removeItem(LS_PENDING_SYNC)
-        const summary = {
-          total: progress.total || 0,
-          new: progress.new || 0,
-          updated: progress.updated || 0,
-          offShelf: progress.off_shelf || 0,
-          duration: progress.duration_seconds || 0
-        }
-        const msg = `同步完成！共 ${summary.total} 件商品，新增 ${summary.new}，更新 ${summary.updated}，跳过 ${progress.skipped || 0}，下架 ${summary.offShelf}`
-        if (isAuto) {
-          autoSyncState.active = false
-          autoSyncState.completed = true
-          autoSyncState.partial = false
-          autoSyncState.progress = 100
-          autoSyncState.summary = summary
-        }
-        showNotice('success', msg)
-        return summary
-      }
-      if (progress.status === 'failed') {
-        if (isAuto) {
-          autoSyncState.active = false
-          autoSyncState.completed = false
-          autoSyncState.partial = false
-          autoSyncState.error = progress.error || '同步失败'
-        }
-        showNotice('error', `同步失败: ${progress.error || '未知错误'}`)
-        return null
-      }
-      if (!isAuto) showNotice('info', `同步中... 进度 ${pct}%`)
-    } catch {
       if (retries % 5 === 0) showNotice('warn', '同步状态暂时不可用，仍在重试获取进度...')
+      continue
     }
+    const progress = res?.data
+    if (!progress || typeof progress !== 'object' || Array.isArray(progress)) {
+      throw new Error('同步进度响应格式异常')
+    }
+    const status = progress.status
+    if (!knownStatuses.includes(status)) throw new Error('同步进度缺少有效任务状态')
+    const pct = Number(progress.progress)
+    if (!Number.isFinite(pct) || pct < 0 || pct > 100) throw new Error('同步进度数值异常')
+    syncTask.value = { id: syncId, status, progress: pct }
+    // 单账号自动同步场景下更新顶部横幅进度；多账号场景由 syncAllAccounts 自行管理
+    if (isAuto) {
+      autoSyncState.progress = pct
+      if (progress.total) autoSyncState.summary.total = progress.total
+      if (progress.new) autoSyncState.summary.new = progress.new
+      if (progress.updated) autoSyncState.summary.updated = progress.updated
+      if (progress.off_shelf) autoSyncState.summary.offShelf = progress.off_shelf
+    }
+    if (status === 'completed') {
+      // 同步成功，更新最后同步时间戳
+      localStorage.setItem(LS_LAST_SYNC_TIME, String(Date.now()))
+      localStorage.removeItem(LS_PENDING_SYNC)
+      const summary = {
+        total: progress.total || 0,
+        new: progress.new || 0,
+        updated: progress.updated || 0,
+        offShelf: progress.off_shelf || 0,
+        duration: progress.duration_seconds || 0
+      }
+      const msg = `同步完成！共 ${summary.total} 件商品，新增 ${summary.new}，更新 ${summary.updated}，跳过 ${progress.skipped || 0}，下架 ${summary.offShelf}`
+      if (isAuto) {
+        autoSyncState.active = false
+        autoSyncState.completed = true
+        autoSyncState.partial = false
+        autoSyncState.progress = 100
+        autoSyncState.summary = summary
+      }
+      showNotice('success', msg)
+      return summary
+    }
+    if (status === 'failed') {
+      if (isAuto) {
+        autoSyncState.active = false
+        autoSyncState.completed = false
+        autoSyncState.partial = false
+        autoSyncState.error = progress.error || '同步失败'
+      }
+      showNotice('error', `同步失败: ${progress.error || '未知错误'}`)
+      return null
+    }
+    if (status === 'cancelled') {
+      throw new Error(progress.error || '同步任务已取消')
+    }
+    if (status === 'not_found') {
+      throw new Error('同步任务不存在或已过期')
+    }
+    if (!isAuto) showNotice('info', `同步中... 进度 ${pct}%`)
   }
   if (!syncPollCanceled) {
     if (isAuto) {

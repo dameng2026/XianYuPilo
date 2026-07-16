@@ -297,6 +297,58 @@
         </section>
 
         <section class="xya-msg-card">
+          <h3 class="xya-msg-order-head">
+            客户订单
+            <span v-if="customerOrders.length" class="xya-msg-order-count">({{ customerOrders.length }})</span>
+            <button
+              type="button"
+              class="xya-msg-order-refresh"
+              :class="{ spinning: loadingCustomerOrders }"
+              :disabled="!selected || loadingCustomerOrders"
+              :title="loadingCustomerOrders ? '加载中…' : '刷新订单'"
+              @click="refreshCustomerOrders"
+            >&#x21bb;</button>
+          </h3>
+          <template v-if="selected">
+            <div v-if="loadingCustomerOrders && !customerOrders.length" class="xya-msg-card-empty">正在加载客户订单…</div>
+            <div v-else-if="customerOrdersError" class="xya-msg-card-empty xya-msg-order-error">{{ customerOrdersError }}</div>
+            <div v-else-if="!customerOrders.length" class="xya-msg-card-empty">暂未匹配到该客户订单。</div>
+            <div v-else class="xya-msg-order-list">
+              <div v-for="order in customerOrders" :key="order.id" class="xya-msg-order-item">
+                <div class="xya-msg-order-item-main">
+                  <div class="xya-msg-order-cover-wrap">
+                    <span class="xya-msg-order-cover-placeholder">&#128230;</span>
+                    <img
+                      v-if="resolveOrderCover(order)"
+                      :src="resolveOrderCover(order)"
+                      class="xya-msg-order-cover"
+                      alt=""
+                      @error="onOrderCoverError"
+                    />
+                  </div>
+                  <div class="xya-msg-order-item-info">
+                    <div class="xya-msg-order-title" :title="orderItemTitle(resolveOrderFirstItem(order))">
+                      {{ orderItemTitle(resolveOrderFirstItem(order)) }}
+                    </div>
+                    <div class="xya-msg-order-meta">
+                      <span class="xya-msg-order-amount">{{ formatOrderAmount(order.totalAmount) }}<template v-if="Number(order.quantityTotal) > 0"> &times; {{ order.quantityTotal }}</template></span>
+                      <span class="xya-msg-order-status" :class="customerOrderStatusClass(order.orderStatus)">{{ customerOrderStatusText(order.orderStatus) }}</span>
+                    </div>
+                    <div class="xya-msg-order-no" :title="order.externalOrderId || order.id">订单号：{{ order.externalOrderId || order.id }}</div>
+                    <div v-if="order.deliveryFailReason" class="xya-msg-order-fail">{{ order.deliveryFailReason }}</div>
+                    <div class="xya-msg-order-time">{{ formatOrderTime(order.createTime) }}</div>
+                  </div>
+                </div>
+                <div class="xya-msg-card-actions">
+                  <button type="button" class="xya-msg-secondary-btn" :disabled="loadingOrderDetail" @click="viewOrderDetail(order.id)">订单详情</button>
+                </div>
+              </div>
+            </div>
+          </template>
+          <div v-else class="xya-msg-card-empty">选中会话后可查看该客户订单。</div>
+        </section>
+
+        <section class="xya-msg-card">
           <h3>自动回复状态</h3>
           <div v-if="aiSettingsLoading && !aiSettingsAvailable" class="xya-msg-inline-state" role="status" aria-live="polite">
             正在读取 AI 自动回复状态...
@@ -393,6 +445,78 @@
           <img :src="previewImageUrl" class="xya-msg-image-preview-img" alt="聊天图片预览" />
         </div>
       </div>
+
+      <div v-if="showOrderDetailModal" class="xya-msg-modal-mask" @click.self="closeOrderDetailModal">
+        <div class="xya-msg-modal xya-msg-order-modal">
+          <div class="xya-msg-modal-head">
+            <h3>订单详情</h3>
+            <button type="button" class="xya-msg-icon-btn" @click="closeOrderDetailModal">关闭</button>
+          </div>
+          <div class="xya-msg-modal-body xya-msg-order-modal-body">
+            <div v-if="loadingOrderDetail" class="xya-msg-card-empty">正在加载订单详情…</div>
+            <div v-else-if="orderDetailError" class="xya-msg-card-empty xya-msg-order-error">{{ orderDetailError }}</div>
+            <template v-else-if="orderDetailData">
+              <div class="xya-msg-order-detail-section">
+                <div class="xya-msg-order-detail-row">
+                  <span class="xya-msg-order-detail-label">订单号</span>
+                  <strong class="xya-msg-order-detail-value">{{ orderDetailData.externalOrderId || orderDetailData.id || '-' }}</strong>
+                </div>
+                <div class="xya-msg-order-detail-row">
+                  <span class="xya-msg-order-detail-label">订单状态</span>
+                  <span class="xya-msg-order-status" :class="customerOrderStatusClass(orderDetailData.orderStatus)">{{ customerOrderStatusText(orderDetailData.orderStatus) }}</span>
+                </div>
+                <div class="xya-msg-order-detail-row">
+                  <span class="xya-msg-order-detail-label">商品总额</span>
+                  <strong class="xya-msg-order-detail-value">{{ formatOrderAmount(orderDetailData.totalAmount) }}</strong>
+                </div>
+                <div class="xya-msg-order-detail-row">
+                  <span class="xya-msg-order-detail-label">买家昵称</span>
+                  <span class="xya-msg-order-detail-value">{{ orderDetailData.buyerName || '-' }}</span>
+                </div>
+                <div class="xya-msg-order-detail-row">
+                  <span class="xya-msg-order-detail-label">买家ID</span>
+                  <span class="xya-msg-order-detail-value">{{ orderDetailData.buyerId || '-' }}</span>
+                </div>
+                <div class="xya-msg-order-detail-row">
+                  <span class="xya-msg-order-detail-label">下单时间</span>
+                  <span class="xya-msg-order-detail-value">{{ formatOrderTime(orderDetailData.createTime) }}</span>
+                </div>
+                <div v-if="orderDetailData.payTime" class="xya-msg-order-detail-row">
+                  <span class="xya-msg-order-detail-label">付款时间</span>
+                  <span class="xya-msg-order-detail-value">{{ formatOrderTime(orderDetailData.payTime) }}</span>
+                </div>
+                <div v-if="orderDetailData.shipTime" class="xya-msg-order-detail-row">
+                  <span class="xya-msg-order-detail-label">发货时间</span>
+                  <span class="xya-msg-order-detail-value">{{ formatOrderTime(orderDetailData.shipTime) }}</span>
+                </div>
+                <div v-if="orderDetailData.deliveryMethod" class="xya-msg-order-detail-row">
+                  <span class="xya-msg-order-detail-label">发货方式</span>
+                  <span class="xya-msg-order-detail-value">{{ orderDetailData.deliveryMethod }}</span>
+                </div>
+                <div v-if="orderDetailData.deliveryStatus" class="xya-msg-order-detail-row">
+                  <span class="xya-msg-order-detail-label">发货状态</span>
+                  <span class="xya-msg-order-detail-value">{{ orderDetailData.deliveryStatus }}</span>
+                </div>
+                <div v-if="orderDetailData.deliveryFailReason" class="xya-msg-order-detail-row">
+                  <span class="xya-msg-order-detail-label">失败原因</span>
+                  <span class="xya-msg-order-detail-value xya-msg-order-fail">{{ orderDetailData.deliveryFailReason }}</span>
+                </div>
+              </div>
+              <div v-if="orderDetailData.items && orderDetailData.items.length" class="xya-msg-order-detail-section">
+                <h4 class="xya-msg-order-detail-subtitle">商品明细</h4>
+                <div v-for="item in orderDetailData.items" :key="item.id" class="xya-msg-order-detail-item">
+                  <div class="xya-msg-order-detail-item-title">{{ item.goodsTitle || '-' }}</div>
+                  <div class="xya-msg-order-detail-item-meta">
+                    <span>&yen;{{ Number(item.goodsPrice || 0).toFixed(2) }}</span>
+                    <span>&times;{{ Math.max(Number(item.goodsCount) || 1, 1) }}</span>
+                    <span v-if="item.specSummary || (item.specName && item.specValue)" class="xya-msg-order-detail-spec">{{ item.specSummary || item.specName + ': ' + item.specValue }}</span>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -466,6 +590,8 @@ import {
   updateAccountAutoReplyScope
 } from '../api/autoReplyScope.js'
 import { queryUserAvatars } from '../api/messages.js'
+import { getCustomerOrders, getOrderDetail } from '../api/orders.js'
+import { createRequestGate } from '../utils/requestLifecycle.js'
 
 const emit = defineEmits(['navigate'])
 
@@ -478,6 +604,153 @@ const emojiList = ['😊', '😂', '😄', '😉', '😍', '🥹', '😆', '😁
 const accounts = ref([])
 const conversations = ref([])
 const selected = ref(null)
+
+// === 客户订单板块状态 ===
+const customerOrders = ref([])
+const loadingCustomerOrders = ref(false)
+const customerOrdersError = ref('')
+const customerOrdersGate = createRequestGate()
+const showOrderDetailModal = ref(false)
+const orderDetailData = ref(null)
+const loadingOrderDetail = ref(false)
+const orderDetailError = ref('')
+const CUSTOMER_ORDER_STATUS_META = {
+  0: { text: '待付款', className: 'warning' },
+  1: { text: '已付款', className: 'info' },
+  2: { text: '待发货', className: 'warning' },
+  3: { text: '已发货', className: 'success' },
+  4: { text: '已完成', className: 'success' },
+  5: { text: '已关闭', className: 'muted' },
+}
+
+// === 客户订单板块函数 ===
+function customerOrderStatusMeta(status) {
+  return CUSTOMER_ORDER_STATUS_META[Number(status)] || { text: String(status ?? '-'), className: 'muted' }
+}
+
+function customerOrderStatusText(status) {
+  return customerOrderStatusMeta(status).text
+}
+
+function customerOrderStatusClass(status) {
+  return customerOrderStatusMeta(status).className
+}
+
+function formatOrderAmount(amount) {
+  const value = Number(amount)
+  if (!Number.isFinite(value) || value <= 0) return '--'
+  return '\u00a5' + value.toFixed(2)
+}
+
+function formatOrderTime(time) {
+  return timeText(time)
+}
+
+function resolveOrderCover(order) {
+  const items = Array.isArray(order?.items) ? order.items : []
+  for (const item of items) {
+    const image = item?.goodsImage
+    if (image && typeof image === 'string' && image.trim()) {
+      return normalizeDisplayImage(image)
+    }
+  }
+  return ''
+}
+
+function resolveOrderFirstItem(order) {
+  const items = Array.isArray(order?.items) ? order.items : []
+  return items.length ? items[0] : null
+}
+
+function orderItemTitle(item) {
+  const title = item?.goodsTitle
+  if (title && String(title).trim()) return title
+  const externalId = item?.externalGoodsId
+  return externalId ? '商品 ' + externalId : '未命名商品'
+}
+
+function onOrderCoverError(event) {
+  const target = event?.target
+  if (!target) return
+  target.style.display = 'none'
+  const placeholder = target.parentElement?.querySelector('.xya-msg-order-cover-placeholder')
+  if (placeholder) placeholder.style.display = 'inline-flex'
+}
+
+function resolveCustomerBuyerId(conversation) {
+  return normalizePeerUserId(conversation?.peerUserId || conversation?.peerExternalUid || conversation?.externalBuyerId || '')
+}
+
+async function loadCustomerOrders(silent = false) {
+  const conversation = selected.value
+  const buyerId = resolveCustomerBuyerId(conversation)
+  const accountId = Number(conversation?.xianyuAccountId || conversation?.accountId || 0) || undefined
+  if (!buyerId || !accountId) {
+    customerOrders.value = []
+    customerOrdersError.value = ''
+    return
+  }
+  if (!silent) {
+    loadingCustomerOrders.value = true
+    customerOrdersError.value = ''
+  }
+  const gate = customerOrdersGate.begin()
+  try {
+    const res = await getCustomerOrders(accountId, buyerId, 10)
+    if (!customerOrdersGate.isCurrent(gate)) return
+    const data = unwrap(res)
+    const records = Array.isArray(data?.records) ? data.records : (Array.isArray(data?.list) ? data.list : (Array.isArray(data) ? data : []))
+    customerOrders.value = records
+    customerOrdersError.value = ''
+  } catch (e) {
+    if (!customerOrdersGate.isCurrent(gate)) return
+    customerOrders.value = []
+    customerOrdersError.value = (e && e.message) || '获取客户订单失败'
+  } finally {
+    if (customerOrdersGate.isCurrent(gate)) {
+      loadingCustomerOrders.value = false
+    }
+  }
+}
+
+async function refreshCustomerOrders() {
+  await loadCustomerOrders(false)
+}
+
+async function viewOrderDetail(orderId) {
+  if (!orderId) return
+  loadingOrderDetail.value = true
+  orderDetailError.value = ''
+  orderDetailData.value = null
+  showOrderDetailModal.value = true
+  try {
+    const res = await getOrderDetail(orderId)
+    const data = unwrap(res)
+    orderDetailData.value = data
+  } catch (e) {
+    orderDetailError.value = (e && e.message) || '加载订单详情失败'
+  } finally {
+    loadingOrderDetail.value = false
+  }
+}
+
+function closeOrderDetailModal() {
+  showOrderDetailModal.value = false
+}
+
+// 选中会话变化时加载客户订单
+watch(() => {
+  const conv = selected.value
+  return conv ? (conv.sid || '') + '|' + resolveCustomerBuyerId(conv) : ''
+}, () => {
+  if (!selected.value) {
+    customerOrders.value = []
+    customerOrdersError.value = ''
+    return
+  }
+  loadCustomerOrders(false).catch(() => {})
+})
+
 const deletedConversations = ref(new Set())
 const contextMessages = ref([])
 const conversationsAvailable = ref(false)
@@ -4228,5 +4501,298 @@ watch(() => selected.value?.xyGoodsId, () => {
   .xya-msg-emoji-btn {
     padding: 6px 0;
   }
+}
+
+/* === 客户订单板块 === */
+.xya-msg-order-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.xya-msg-order-count {
+  font-size: 13px;
+  font-weight: 500;
+  color: #7384a8;
+}
+
+.xya-msg-order-refresh {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  cursor: pointer;
+  color: #3259cf;
+  font-size: 18px;
+  line-height: 1;
+  transition: background 0.2s ease;
+}
+
+.xya-msg-order-refresh:hover:not(:disabled) {
+  background: #eef3ff;
+}
+
+.xya-msg-order-refresh:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.xya-msg-order-refresh.spinning {
+  animation: xya-msg-spin 0.9s linear infinite;
+}
+
+@keyframes xya-msg-spin {
+  to { transform: rotate(360deg); }
+}
+
+.xya-msg-card-empty {
+  padding: 14px 8px;
+  color: #7384a8;
+  font-size: 13px;
+  text-align: center;
+}
+
+.xya-msg-order-list {
+  display: grid;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.xya-msg-order-item {
+  padding: 12px;
+  border-radius: 16px;
+  background: linear-gradient(180deg, #fbfdff 0%, #f6faff 100%);
+  border: 1px solid #e7eef9;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.xya-msg-order-item:hover {
+  border-color: #c2d5f5;
+  box-shadow: 0 8px 22px rgba(23, 61, 135, 0.08);
+  transform: translateY(-1px);
+}
+
+.xya-msg-order-item-main {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.xya-msg-order-cover-wrap {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border-radius: 14px;
+  overflow: hidden;
+  background: #eef3fb;
+  flex-shrink: 0;
+  box-shadow: 0 2px 6px rgba(23, 61, 135, 0.08);
+}
+
+.xya-msg-order-cover-placeholder {
+  position: absolute;
+  inset: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 26px;
+  opacity: 0.7;
+}
+
+.xya-msg-order-cover {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.xya-msg-order-item-info {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.xya-msg-order-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #112147;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+.xya-msg-order-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.xya-msg-order-amount {
+  font-size: 14px;
+  color: #e6532e;
+  font-weight: 700;
+  letter-spacing: -0.2px;
+}
+
+.xya-msg-order-status {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  border-radius: 9px;
+  font-size: 11.5px;
+  font-weight: 600;
+  background: #eef3ff;
+  color: #3259cf;
+  letter-spacing: 0.2px;
+}
+
+.xya-msg-order-status.warning {
+  background: #fff4eb;
+  color: #c56a18;
+}
+
+.xya-msg-order-status.success {
+  background: #eefaf2;
+  color: #1d8a52;
+}
+
+.xya-msg-order-status.info {
+  background: #eef3ff;
+  color: #3259cf;
+}
+
+.xya-msg-order-status.muted {
+  background: #f0f2f7;
+  color: #7384a8;
+}
+
+.xya-msg-order-no {
+  font-size: 11.5px;
+  color: #9aa8c4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.xya-msg-order-time {
+  font-size: 11.5px;
+  color: #9aa8c4;
+  font-variant-numeric: tabular-nums;
+}
+
+.xya-msg-order-fail {
+  font-size: 12px;
+  color: #e5484d;
+  line-height: 1.5;
+  background: #fdecec;
+  padding: 4px 8px;
+  border-radius: 8px;
+  margin-top: 2px;
+}
+
+.xya-msg-order-error {
+  color: #e5484d;
+}
+
+.xya-msg-order-item .xya-msg-card-actions {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed #e7eef9;
+}
+
+/* === 订单详情弹窗 === */
+.xya-msg-order-modal {
+  width: min(560px, 100%);
+  max-height: min(82vh, 880px);
+}
+
+.xya-msg-order-modal-body {
+  overflow: auto;
+}
+
+.xya-msg-order-detail-section {
+  display: grid;
+  gap: 10px;
+}
+
+.xya-msg-order-detail-section + .xya-msg-order-detail-section {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid #edf3fc;
+}
+
+.xya-msg-order-detail-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.xya-msg-order-detail-label {
+  flex-shrink: 0;
+  width: 84px;
+  color: #7384a8;
+  font-size: 13px;
+}
+
+.xya-msg-order-detail-value {
+  flex: 1;
+  text-align: right;
+  color: #112147;
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.xya-msg-order-detail-subtitle {
+  margin: 0 0 10px;
+  font-size: 14px;
+  font-weight: 700;
+  color: #102147;
+}
+
+.xya-msg-order-detail-item {
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: #f8fbff;
+  border: 1px solid #e7eef9;
+}
+
+.xya-msg-order-detail-item + .xya-msg-order-detail-item {
+  margin-top: 8px;
+}
+
+.xya-msg-order-detail-item-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #112147;
+  line-height: 1.5;
+}
+
+.xya-msg-order-detail-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: #516286;
+}
+
+.xya-msg-order-detail-spec {
+  color: #7384a8;
 }
 </style>

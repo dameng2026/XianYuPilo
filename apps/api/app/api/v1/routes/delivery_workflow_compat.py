@@ -306,6 +306,11 @@ def _delivery_record(row: dict[str, Any]) -> dict[str, Any]:
         "completedTime": _format_datetime(row.get("completed_time")),
         "platformSyncTime": _format_datetime(row.get("platform_sync_time")),
         "result": row.get("result") or "",
+        "purchaseTime": _format_datetime(row.get("purchase_time")),
+        "goodsId": row.get("goods_id"),
+        "goodsCoverPic": row.get("goods_cover_pic") or "",
+        "sellerName": row.get("seller_name") or "",
+        "sellerDisplayName": row.get("seller_display_name") or "",
     }
 
 
@@ -3036,6 +3041,7 @@ async def get_delivery_records(
         "OR BINARY COALESCE(o.item_id, '') = BINARY COALESCE(g.external_goods_id, '') "
         "OR BINARY COALESCE(o.item_id, '') = BINARY COALESCE(g.goods_id, '')"
         ") "
+        "LEFT JOIN xianyu_account acc ON acc.id = dr.account_id AND acc.deleted = 0 "
     )
 
     total = (
@@ -3071,7 +3077,12 @@ async def get_delivery_records(
                     o.external_order_id,
                     o.buyer_name,
                     o.buyer_id,
-                    g.title AS goods_title
+                    g.title AS goods_title,
+                    g.id AS goods_id,
+                    COALESCE(g.cover_pic, g.image_url) AS goods_cover_pic,
+                    COALESCE(o.pay_time, o.create_time, o.created_time) AS purchase_time,
+                    acc.nickname AS seller_name,
+                    acc.display_name AS seller_display_name
                     {join_sql}
                 WHERE {' AND '.join(where_sql)}
                 ORDER BY dr.created_time DESC, dr.id DESC
@@ -3117,7 +3128,12 @@ async def get_delivery_record_detail(
                     o.external_order_id,
                     o.buyer_name,
                     o.buyer_id,
-                    g.title AS goods_title
+                    g.title AS goods_title,
+                    g.id AS goods_id,
+                    COALESCE(g.cover_pic, g.image_url) AS goods_cover_pic,
+                    COALESCE(o.pay_time, o.create_time, o.created_time) AS purchase_time,
+                    acc.nickname AS seller_name,
+                    acc.display_name AS seller_display_name
                 FROM delivery_record dr
                 LEFT JOIN xianyu_trade_order o
                   ON o.id = dr.order_id
@@ -3129,6 +3145,9 @@ async def get_delivery_record_detail(
                     OR BINARY COALESCE(o.item_id, '') = BINARY COALESCE(g.external_goods_id, '')
                     OR BINARY COALESCE(o.item_id, '') = BINARY COALESCE(g.goods_id, '')
                  )
+                LEFT JOIN xianyu_account acc
+                  ON acc.id = dr.account_id
+                 AND acc.deleted = 0
                 WHERE dr.id = :record_id
                   AND dr.deleted = 0
                 LIMIT 1

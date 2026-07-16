@@ -864,6 +864,7 @@ async def delete_goods_remote(
 @router.get("/orders", response_model=ResultObject)
 async def list_orders(
     account_id: Optional[int] = Query(None, alias="accountId"),
+    buyer_id: Optional[str] = Query(None, alias="buyerId"),
     keyword: Optional[str] = Query(None),
     status: Optional[int] = Query(None),
     current: int = Query(1, ge=1),
@@ -879,6 +880,8 @@ async def list_orders(
     query = select(XianyuTradeOrder).where(XianyuTradeOrder.deleted == 0)
     if account_id is not None:
         query = query.where(XianyuTradeOrder.account_id == account_id)
+    if buyer_id:
+        query = query.where(XianyuTradeOrder.buyer_id == buyer_id)
     if status is not None:
         query = query.where(XianyuTradeOrder.order_status == status)
     if keyword:

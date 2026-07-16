@@ -53,7 +53,12 @@ export function buildDeliveryRecordRowViewModel(record) {
   return {
     ...record,
     goodsTitleText: record?.goodsTitle || record?.goodsName || '-',
+    goodsCoverPic: record?.goodsCoverPic || '',
+    goodsId: record?.goodsId || null,
+    externalOrderId: record?.externalOrderId || '',
     buyerNameText: record?.buyerNick || record?.buyerName || '-',
+    sellerNameText: record?.sellerDisplayName || record?.sellerName || '-',
+    purchaseTimeText: dateTime(record?.purchaseTime),
     timingText: TIMING_TEXT[record?.deliveryTiming || record?.timing] || record?.deliveryTiming || record?.timing || '-',
     deliveryModeText: record?.deliveryMode === 'card' ? '卡密' : '文本',
     deliveryStatusText: meta.text,

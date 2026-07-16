@@ -3,6 +3,7 @@
     <div v-if="error" class="global-notice error" role="alert">{{ error }}</div>
     <div v-if="warning" class="global-notice warning" role="status">{{ warning }}</div>
     <div v-if="success" class="global-notice success" role="status">{{ success }}</div>
+    <div v-if="detailLoadError" class="global-notice error" role="alert">{{ detailLoadError }}</div>
 
     <CardPanel title="订单筛选">
       <div class="toolbar wrap">
@@ -248,6 +249,7 @@ const total = ref(0)
 const error = ref('')
 const warning = ref('')
 const success = ref('')
+const detailLoadError = ref('')
 const syncingList = ref(false)
 const syncingOrderId = ref(null)
 const manualSubmitting = ref(false)
@@ -303,6 +305,7 @@ function clearNotice() {
   error.value = ''
   warning.value = ''
   success.value = ''
+  detailLoadError.value = ''
 }
 
 function appendWarning(message) {
@@ -405,11 +408,24 @@ async function loadOrders(options = {}) {
 
 async function selectOrder(row) {
   clearNotice()
+  detailLoadError.value = ''
+  selected.value = null
+  manualForm.visible = false
+  if (ordersAvailable.value === false) {
+    detailLoadError.value = '订单列表不可用，请先刷新列表'
+    return false
+  }
   try {
     const res = await getOrderDetail(row.id)
-    selected.value = res.data || row
+    if (!res?.data || typeof res.data !== 'object' || Array.isArray(res.data)
+      || String(res.data.id ?? '') !== String(row.id)) {
+      throw new Error('订单详情响应格式异常')
+    }
+    selected.value = res.data
+    return true
   } catch (requestError) {
-    error.value = requestError.message || '加载订单详情失败'
+    detailLoadError.value = requestError?.message || '加载订单详情失败'
+    return false
   }
 }
 
@@ -447,9 +463,8 @@ function primeManualForm() {
 
 async function openManualDelivery(row) {
   if (!selected.value || String(selected.value.id) !== String(row.id)) {
-    await selectOrder(row)
+    if (!await selectOrder(row)) return
   }
-  if (!selected.value || String(selected.value.id) !== String(row.id)) return
   primeManualForm()
   manualForm.visible = true
 }
@@ -533,13 +548,16 @@ async function syncCurrentOrder(row) {
   syncingOrderId.value = row.id
   try {
     const res = await syncOrder(row.id)
-    const data = res?.data || {}
-    const syncMessage = data.message || '订单同步已完成'
+    const data = res?.data
+    if (!data || typeof data !== 'object' || Array.isArray(data) || typeof data.ok !== 'boolean') {
+      throw new Error('订单同步结果响应格式异常')
+    }
     await loadOrders({ keepSelectedId: row.id, sync: false })
     if (selected.value && String(selected.value.id) === String(row.id)) {
       await refreshSelectedOrder()
     }
-    success.value = syncMessage
+    if (data.ok) success.value = data.message || '订单同步已完成'
+    else error.value = data.message || '订单同步失败'
   } catch (requestError) {
     error.value = requestError.message || '提交订单同步失败'
   } finally {
@@ -559,7 +577,10 @@ async function syncAccountOrders() {
       accountId: Number(query.accountId),
       syncDeliveryStatus: true
     })
-    const data = res?.data || {}
+    const data = res?.data
+    if (!data || typeof data !== 'object' || Array.isArray(data) || typeof data.ok !== 'boolean') {
+      throw new Error('账号订单同步结果响应格式异常')
+    }
     await loadOrders({ sync: false })
     if (data.ok === false) error.value = data.message || '账号订单同步失败'
     else success.value = data.message || '账号真实订单同步已完成'

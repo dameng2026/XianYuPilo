@@ -65,6 +65,18 @@
         :row-key="row => row.id"
         @row-click="showDetail"
       >
+        <template #goods="{ row }">
+          <div class="goods-cell">
+            <img
+              v-if="row.goodsCoverPic"
+              :src="row.goodsCoverPic"
+              alt=""
+              class="goods-thumb"
+              @error="onGoodsThumbError(row, $event)"
+            />
+            <span class="cell-ellipsis" :title="row.goodsTitleText">{{ row.goodsTitleText }}</span>
+          </div>
+        </template>
         <template #status="{ row }">
           <Badge :type="row.deliveryBadge">{{ row.deliveryStatusText }}</Badge>
         </template>
@@ -93,8 +105,12 @@
       <div class="detail-grid">
         <div><b>记录 ID：</b> {{ detailView.id || '-' }}</div>
         <div><b>订单号：</b> {{ detailView.orderId || '-' }}</div>
+        <div><b>外部订单号：</b> {{ detailView.externalOrderId || '-' }}</div>
         <div><b>商品：</b> {{ detailView.goodsTitleText }}</div>
+        <div><b>商品 ID：</b> {{ detailView.goodsId || '-' }}</div>
         <div><b>买家：</b> {{ detailView.buyerNameText }}</div>
+        <div><b>卖家：</b> {{ detailView.sellerNameText }}</div>
+        <div><b>购买时间：</b> {{ detailView.purchaseTimeText || '-' }}</div>
         <div><b>状态：</b> {{ detailView.deliveryStatusText }}</div>
         <div><b>进度：</b> {{ detailView.deliveryProgressText }}</div>
         <div><b>时机：</b> {{ detailView.timingText }}</div>
@@ -127,7 +143,7 @@ import AppButton from '../components/AppButton.vue'
 import Pagination from '../components/Pagination.vue'
 import EmptyState from '../components/EmptyState.vue'
 import { getDeliveryRecordDetail, getDeliveryRecords } from '../api/autoDelivery.js'
-import { camelizeKeys, recordsOf, totalOf } from '../utils/apiData.js'
+import { camelizeKeys, recordsOf, recordsOfOrThrow, totalOf } from '../utils/apiData.js'
 import { createLatestRequestGuard, listRefreshRequestConfig } from '../utils/latestRequest.js'
 import {
   buildDeliveryRecordDetailViewModel,
@@ -159,13 +175,15 @@ const query = reactive({
 const columns = [
   { key: 'id', title: 'ID' },
   { key: 'orderId', title: '订单号' },
-  { key: 'goodsTitleText', title: '商品' },
+  { key: 'goods', title: '商品' },
   { key: 'buyerNameText', title: '买家' },
+  { key: 'sellerNameText', title: '卖家' },
   { key: 'timing', title: '时机' },
   { key: 'mode', title: '方式' },
   { key: 'status', title: '状态' },
   { key: 'progress', title: '进度' },
   { key: 'errorMessage', title: '错误' },
+  { key: 'purchaseTimeText', title: '购买时间' },
   { key: 'createdTimeText', title: '创建时间' },
   { key: 'op', title: '操作' }
 ]
@@ -173,6 +191,10 @@ const columns = [
 const rows = computed(() => records.value.map(buildDeliveryRecordRowViewModel))
 const recordsRefreshing = computed(() => recordsLoading.value && recordsAvailable.value === true)
 const detailView = computed(() => (detail.value ? buildDeliveryRecordDetailViewModel(detail.value) : null))
+
+function onGoodsThumbError(_row, event) {
+  if (event?.target) event.target.style.display = 'none'
+}
 
 function clearNotice() {
   error.value = ''
@@ -201,7 +223,7 @@ async function load() {
   try {
     const res = await getDeliveryRecords(buildQuery(), listRefreshRequestConfig(hadSnapshot))
     if (!request.isCurrent()) return
-    records.value = camelizeKeys(recordsOf(res.data))
+    records.value = camelizeKeys(recordsOfOrThrow(res.data, '发货记录响应格式异常'))
     total.value = totalOf(res.data, records.value.length)
     recordsAvailable.value = true
   } catch (requestError) {
@@ -480,4 +502,6 @@ onBeforeUnmount(() => {
     margin-bottom: 10px;
   }
 }
+.goods-cell { display: flex; align-items: center; gap: 8px; min-width: 120px; }
+.goods-thumb { width: 40px; height: 40px; object-fit: cover; border-radius: 6px; flex-shrink: 0; }
 </style>

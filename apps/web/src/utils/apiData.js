@@ -20,10 +20,32 @@ export function recordsOf(input) {
   return []
 }
 
+/**
+ * 严格版本的 recordsOf：当无法从响应中提取出数组时抛出异常，
+ * 用于必须拿到列表的强契约场景（避免静默降级到空数组掩盖后端异常）。
+ */
+export function recordsOfOrThrow(input, message = '列表响应格式异常') {
+  const data = payloadOf(input)
+  if (Array.isArray(data)) return data
+  if (data && typeof data === 'object') {
+    for (const key of ['records', 'list', 'rows', 'items', 'accounts', 'conversations']) {
+      if (Array.isArray(data[key])) return data[key]
+    }
+    if (Object.prototype.hasOwnProperty.call(data, 'data')) return recordsOfOrThrow(data.data, message)
+  }
+  throw new Error(message)
+}
+
 export function totalOf(input, fallback = 0) {
   const data = payloadOf(input)
-  if (!data) return fallback
-  return Number(data.total ?? data.totalCount ?? data.count ?? data.pagination?.total ?? fallback) || 0
+  if (!data || Array.isArray(data)) return fallback
+  const rawTotal = data.total ?? data.totalCount ?? data.count ?? data.pagination?.total
+  if (rawTotal === null || rawTotal === undefined || rawTotal === '') return fallback
+  const total = Number(rawTotal)
+  if (!Number.isSafeInteger(total) || total < 0 || total < fallback) {
+    throw new Error('列表总数响应格式异常')
+  }
+  return total
 }
 
 export function unwrap(input) {

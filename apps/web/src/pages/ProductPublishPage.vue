@@ -51,7 +51,7 @@
               @dragover.prevent="onDragOver(idx, $event)"
               @drop="onDrop(idx, $event)"
             >
-              <img :src="img" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:10px">
+              <img :src="resolveTrustedMediaUrl(img)" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:10px">
               <button type="button" class="img-remove" :disabled="uploadingImages" :aria-label="`移除第 ${idx + 1} 张图片`" @click="removeImage(idx)">×</button>
             </div>
             <button
@@ -235,25 +235,45 @@
             <input v-model="form.stock" type="number" placeholder="1">
           </div>
         </div>
-        <div class="option-line unavailable-option" style="margin-top:12px" title="当前发布接口尚未支持规格组合的完整提交与回读核验">
-          <span>多规格 <em>当前不可用，仅支持单规格发布</em></span>
-          <ToggleSwitch :on="false" />
+        <div class="option-line" style="margin-top:12px">
+          <span>启用多规格</span>
+          <ToggleSwitch :on="skuEnabled" @click="skuEnabled = !skuEnabled" />
         </div>
+        <template v-if="skuEnabled">
+          <div style="margin-top:12px;border-top:1px solid #eee;padding-top:12px">
+            <div class="toolbar">
+              <span class="subtle">直接在下表维护真实规格组合、售价与库存</span>
+            </div>
+            <table class="base-table sku-table">
+              <thead><tr><th>规格组合</th><th>售价（元）</th><th>原价（元）</th><th>库存（件）</th><th></th></tr></thead>
+              <tbody>
+                <tr v-for="(sku, i) in skus" :key="i">
+                  <td>{{ sku.name }}</td>
+                  <td><input v-model="sku.price" type="number" step="0.01" min="0" style="width:80px"></td>
+                  <td><input v-model="sku.originalPrice" type="number" step="0.01" min="0" style="width:80px"></td>
+                  <td><input v-model="sku.stock" type="number" min="0" style="width:70px"></td>
+                  <td><button class="link danger-text" type="button" title="删除此行" @click="removeSku(i)">✕</button></td>
+                </tr>
+              </tbody>
+            </table>
+            <div style="margin-top:8px"><AppButton type="ghost" @click="addSku">+ 添加规格</AppButton></div>
+          </div>
+        </template>
       </CardPanel>
 
       <CardPanel title="发货设置" style="margin-top:16px">
         <div class="shipping-grid">
           <div class="shipping-item">
             <span>包邮</span>
-            <ToggleSwitch :on="true" />
+            <ToggleSwitch :on="shippingMode === 'free'" @click="setShipping('free')" />
           </div>
-          <div class="shipping-item unavailable-option" title="固定运费尚未完成平台发布与回读核验">
-            <span>一口价 / 运费（当前不可用）</span>
-            <ToggleSwitch :on="false" />
+          <div class="shipping-item">
+            <span>一口价 / 运费</span>
+            <ToggleSwitch :on="shippingMode === 'fixed'" @click="setShipping('fixed')" />
           </div>
-          <div class="shipping-item unavailable-option" title="无需邮寄模式尚未完成平台发布与回读核验">
-            <span>无需邮寄（当前不可用）</span>
-            <ToggleSwitch :on="false" />
+          <div class="shipping-item">
+            <span>无需邮寄</span>
+            <ToggleSwitch :on="shippingMode === 'none'" @click="setShipping('none')" />
           </div>
           <div class="shipping-item">
             <span>支持自提</span>
@@ -268,7 +288,7 @@
       <CardPanel title="商品预览">
         <div class="product-cell">
           <div class="product-thumb" style="width:130px;height:98px">
-            <img v-if="form.imageUrls.length > 0" :src="form.imageUrls[0]" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:10px">
+            <img v-if="form.imageUrls.length > 0" :src="resolveTrustedMediaUrl(form.imageUrls[0])" alt="" style="width:100%;height:100%;object-fit:cover;border-radius:10px">
             <div v-else style="width:100%;height:100%;background:#f0f0f0;border-radius:10px;display:flex;align-items:center;justify-content:center;color:#ccc;font-size:12px">暂无图片</div>
           </div>
           <div>
@@ -281,9 +301,9 @@
         <div class="option-line"><span>闲鱼账号</span><b>{{ selectedAccount || '未选择' }}</b></div>
         <div class="option-line"><span>商品分类</span><b>{{ selectedCategoryPath || '未选择' }}</b></div>
         <div class="option-line"><span>商品位置</span><b>{{ selectedPoi?.name || '未选择' }}</b></div>
-        <div class="option-line"><span>规格能力</span><b>单规格</b></div>
+        <div class="option-line"><span>规格能力</span><b>{{ skuEnabled ? '多规格' : '单规格' }}</b></div>
         <div class="option-line"><span>总库存</span><b>{{ totalStock }}件</b></div>
-        <div class="option-line"><span>运费模式</span><b>包邮</b></div>
+        <div class="option-line"><span>运费模式</span><b>{{ shippingLabel }}</b></div>
       </CardPanel>
       <CardPanel title="发布检查" style="margin-top:16px">
         <div v-for="i in checks" :key="i.text" class="option-line">
@@ -322,6 +342,9 @@ import {
   isProductAsyncRequestCurrent,
   markPendingProductSync,
 } from '../utils/productPublishState.js'
+import { imageUploadValidationMessage } from '../utils/imageUploadPolicy.js'
+import { accountAuthUsable, pickPreferredAccount } from '../utils/accountAuth.js'
+import { resolveTrustedMediaUrl } from '../utils/safeMediaUrl.js'
 
 const emit = defineEmits(['navigate'])
 const accounts = ref([])
@@ -780,6 +803,29 @@ const form = reactive({
   supportSelfPick: false,
 })
 
+// === SKU 多规格 ===
+const skuEnabled = ref(false)
+const skus = reactive([
+  { name: '规格组合 1', price: '', originalPrice: '', stock: '' },
+])
+function addSku() {
+  skus.push({ name: '规格组合 ' + (skus.length + 1), price: '', originalPrice: '', stock: '' })
+}
+function removeSku(idx) {
+  if (skus.length <= 1) return
+  skus.splice(idx, 1)
+}
+
+// === 运费设置 ===
+const shippingMode = ref('free')
+function setShipping(mode) {
+  shippingMode.value = mode
+}
+const shippingLabel = computed(() => {
+  const map = { free: '包邮', fixed: '一口价 / 运费', none: '无需邮寄' }
+  return map[shippingMode.value] || '包邮'
+})
+
 watch(() => form.accountId, (nextAccountId, previousAccountId) => {
   if (String(nextAccountId ?? '') === String(previousAccountId ?? '')) return
   const discardedUpload = uploadingImages.value
@@ -961,8 +1007,14 @@ function clearPoi() {
 // 已改用 amapInputTips 统一请求，不再需要本地 request 封装
 
 const selectedAccount = computed(() => accountName(accounts.value.find(a => String(a.id) === String(form.accountId)) || {}))
-const displayPrice = computed(() => form.price || '0.00')
-const totalStock = computed(() => Number(form.stock) || 0)
+const displayPrice = computed(() => {
+  if (skuEnabled.value && skus.length > 0 && skus[0].price) return skus[0].price
+  return form.price || '0.00'
+})
+const totalStock = computed(() => {
+  if (skuEnabled.value) return skus.reduce((sum, s) => sum + (Number(s.stock) || 0), 0)
+  return Number(form.stock) || 0
+})
 const confirmationPayload = computed(() => publishIntent.payload || {
   xianyuAccountId: Number(form.accountId),
   title: form.title,
@@ -1027,6 +1079,11 @@ async function onFileSelect(e) {
   warning.value = ''
   try {
     for (const file of toUpload) {
+      const validationMessage = imageUploadValidationMessage(file)
+      if (validationMessage) {
+        uploadError = '图片 "' + file.name + '" ' + validationMessage
+        continue
+      }
       try {
         const res = await uploadImage(uploadAccountId || 0, file)
         if (!isProductAsyncRequestCurrent({
@@ -1112,6 +1169,10 @@ async function load() {
   if (accountResult.status === 'fulfilled') {
     accounts.value = accountResult.value
     accountsAvailable.value = true
+    if (!form.accountId || !accountAuthUsable(accounts.value.find(a => String(a.id) === String(form.accountId)))) {
+      const preferred = pickPreferredAccount(accounts.value, form.accountId)
+      if (preferred) form.accountId = preferred.id
+    }
     if (!form.accountId && accounts.value[0]) form.accountId = accounts.value[0].id
   } else {
     accounts.value = []
@@ -1267,8 +1328,10 @@ async function submit() {
   if (!ok) return
   submitting.value = true
   try {
-    const finalPrice = form.price
-    const finalStock = Number(form.stock) || 1
+    const finalPrice = skuEnabled.value && skus[0]?.price ? skus[0].price : form.price
+    const finalStock = skuEnabled.value ? totalStock.value : (Number(form.stock) || 1)
+    const shippingMap = { free: true, fixed: false, none: false }
+    const freeShipping = shippingMap[shippingMode.value] ?? true
 
     // 构建位置数据
     const locationData = selectedPoi.value ? {
@@ -1300,9 +1363,9 @@ async function submit() {
         price: finalPrice,
         stock: finalStock,
         category: selectedCategoryName.value,
-        shippingMode: 'free',
-        postFee: 0,
-        freeShipping: true,
+        shippingMode: shippingMode.value,
+        postFee: shippingMode.value === 'fixed' ? 0 : 0,
+        freeShipping: freeShipping,
         supportSelfPick: form.supportSelfPick,
         location: locationData,
       }
