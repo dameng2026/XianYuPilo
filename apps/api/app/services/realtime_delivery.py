@@ -898,13 +898,54 @@ class XianyuRealtimeDeliveryGateway:
         self,
         lease: RealtimeDeliveryAttemptLease,
     ) -> ExternalDeliveryResult:
-        from .xianyu_api_service import confirm_shipment
+        external_order_id = str(lease.external_order_id or "")
 
-        result = await asyncio.to_thread(
-            confirm_shipment,
-            lease.account_id,
-            str(lease.external_order_id or ""),
-        )
+        # 小刀订单需调用免拼发货接口，普通订单调用确认发货接口
+        is_bargain = False
+        if external_order_id:
+            try:
+                from ..core.database import async_session
+                from ..models.entities import XianyuTradeOrder
+                from sqlalchemy import select
+
+                async with async_session() as db:
+                    bargain_result = await db.execute(
+                        select(XianyuTradeOrder.is_bargain).where(
+                            XianyuTradeOrder.account_id == lease.account_id,
+                            XianyuTradeOrder.external_order_id == external_order_id,
+                            XianyuTradeOrder.deleted == 0,
+                        )
+                    )
+                    bargain_row = bargain_result.scalar_one_or_none()
+                    if bargain_row:
+                        is_bargain = bool(bargain_row)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "查询订单小刀状态失败，按普通订单处理 accountId=%d orderNo=%s errorType=%s",
+                    lease.account_id,
+                    external_order_id,
+                    type(exc).__name__,
+                )
+
+        if is_bargain:
+            from .xianyu_api_service import freeshipping_order
+
+            result = await asyncio.to_thread(
+                freeshipping_order,
+                lease.account_id,
+                external_order_id,
+                str(lease.item_id or ""),
+                str(lease.peer_id or ""),
+            )
+        else:
+            from .xianyu_api_service import confirm_shipment
+
+            result = await asyncio.to_thread(
+                confirm_shipment,
+                lease.account_id,
+                external_order_id,
+            )
+
         if isinstance(result, dict) and result.get("success") is True:
             return ExternalDeliveryResult.confirmed()
 

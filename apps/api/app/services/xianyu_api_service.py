@@ -487,6 +487,59 @@ def confirm_shipment(account_id: int, order_id: str) -> Optional[dict]:
     }
 
 
+def freeshipping_order(account_id: int, order_id: str, item_id: str, buyer_id: str) -> Optional[dict]:
+    """免拼发货（小刀订单专用）。
+
+    调用 API: mtop.idle.groupon.activity.seller.freeshipping
+    小刀（砍价）订单需通过免拼接口发货，而非普通的确认发货接口。
+    使用 _post_mtop_with_token_retry 自动处理令牌过期。
+    """
+    auth = _get_account_auth(account_id)
+    if not auth:
+        return {"success": False, "error": "无法获取账号认证信息"}
+
+    cookie_str = _decrypt_value(auth.get("encrypted_cookie") or "")
+    if not cookie_str:
+        return {"success": False, "error": "Cookie为空"}
+
+    # itemId 和 buyerId 需为数值类型，bizOrderId 为字符串
+    try:
+        item_id_val: int = int(item_id) if str(item_id).strip() else 0
+    except (ValueError, TypeError):
+        item_id_val = 0
+    try:
+        buyer_id_val: int = int(buyer_id) if str(buyer_id).strip() else 0
+    except (ValueError, TypeError):
+        buyer_id_val = 0
+
+    data_str = json.dumps(
+        {
+            "bizOrderId": str(order_id),
+            "itemId": item_id_val,
+            "buyerId": buyer_id_val,
+        },
+        separators=(",", ":"),
+    )
+
+    result = _post_mtop_with_token_retry(
+        account_id, cookie_str, "mtop.idle.groupon.activity.seller.freeshipping", data_str
+    )
+    if result.get("success"):
+        return {"success": True, "data": result.get("data", {})}
+
+    # 已发货视为成功
+    ret = result.get("ret")
+    ret_text = " ".join(str(r) for r in ret) if isinstance(ret, (list, tuple)) else str(ret or "")
+    if "ORDER_ALREADY_DELIVERY" in ret_text or "已发货成功" in ret_text:
+        return {"success": True, "data": {}}
+
+    return {
+        "success": False,
+        "error": result.get("error") or "PLATFORM_REJECTED",
+        "ret": ret,
+    }
+
+
 def check_login_status(account_id: int) -> Optional[dict]:
     """检查Cookie登录状态。
     

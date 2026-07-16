@@ -9,7 +9,8 @@
 ## [Unreleased]
 
 ### 新增
-- **发布商品页面增强**：启用 SKU 多规格表格（增删规格行、独立售价/原价/库存）；运费设置支持包邮/一口价/无需邮寄三模式互斥切换；图片 URL 增加 resolveTrustedMediaUrl 白名单防护（防 XSS）；图片上传增加 imageUploadValidationMessage 预校验（大小≤5MB、MIME 类型、扩展名）；账号选择增加 pickPreferredAccount 智能选择（优先可用账号）；发布摘要动态显示规格能力与运费模式
+- **小刀订单免拼发货**：小刀（砍价）订单自动调用闲鱼免拼发货接口（mtop.idle.groupon.activity.seller.freeshipping）完成发货，而非普通确认发货接口；订单同步时通过 btnList 的 SKIP_PIN 自动检测小刀订单并标记 is_bargain（只置 True 不回退）；自动发货网关根据订单小刀状态智能路由免拼/确认发货接口
+- **发布商品页面增强**：运费设置支持包邮/一口价/无需邮寄三模式互斥切换；图片 URL 增加 resolveTrustedMediaUrl 白名单防护（防 XSS）；图片上传增加 imageUploadValidationMessage 预校验（大小≤5MB、MIME 类型、扩展名）；账号选择增加 pickPreferredAccount 智能选择（优先可用账号）
 - **在线消息页面客户订单板块**：会话侧边栏新增客户订单卡片（封面、状态徽章、金额、订单详情入口）；新增 getCustomerOrders API；后端 /orders 接口支持 buyerId 过滤
 - **发布商品基础设施**：新增 requestLifecycle.js（createRequestGate 请求竞态保护）、imageUploadPolicy.js（图片上传预校验）、publishAddress.js（地址标准化工具）、PublishAddressCascader.vue（三级地址级联选择器）、safeMediaUrl.js（可信媒体 URL 校验）
 - **发货记录页面数据完整性**：后端 SQL 补齐 purchase_time/goods_cover_pic/seller_name/seller_display_name/goods_id 字段；JOIN xianyu_account 表获取卖家信息；前端新增商品缩略图列（含 onGoodsThumbError 容错）、卖家列、购买时间列；详情面板新增外部订单号/商品ID/卖家/购买时间字段

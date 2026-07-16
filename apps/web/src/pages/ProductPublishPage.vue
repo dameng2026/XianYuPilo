@@ -235,30 +235,6 @@
             <input v-model="form.stock" type="number" placeholder="1">
           </div>
         </div>
-        <div class="option-line" style="margin-top:12px">
-          <span>启用多规格</span>
-          <ToggleSwitch :on="skuEnabled" @click="skuEnabled = !skuEnabled" />
-        </div>
-        <template v-if="skuEnabled">
-          <div style="margin-top:12px;border-top:1px solid #eee;padding-top:12px">
-            <div class="toolbar">
-              <span class="subtle">直接在下表维护真实规格组合、售价与库存</span>
-            </div>
-            <table class="base-table sku-table">
-              <thead><tr><th>规格组合</th><th>售价（元）</th><th>原价（元）</th><th>库存（件）</th><th></th></tr></thead>
-              <tbody>
-                <tr v-for="(sku, i) in skus" :key="i">
-                  <td>{{ sku.name }}</td>
-                  <td><input v-model="sku.price" type="number" step="0.01" min="0" style="width:80px"></td>
-                  <td><input v-model="sku.originalPrice" type="number" step="0.01" min="0" style="width:80px"></td>
-                  <td><input v-model="sku.stock" type="number" min="0" style="width:70px"></td>
-                  <td><button class="link danger-text" type="button" title="删除此行" @click="removeSku(i)">✕</button></td>
-                </tr>
-              </tbody>
-            </table>
-            <div style="margin-top:8px"><AppButton type="ghost" @click="addSku">+ 添加规格</AppButton></div>
-          </div>
-        </template>
       </CardPanel>
 
       <CardPanel title="发货设置" style="margin-top:16px">
@@ -301,7 +277,6 @@
         <div class="option-line"><span>闲鱼账号</span><b>{{ selectedAccount || '未选择' }}</b></div>
         <div class="option-line"><span>商品分类</span><b>{{ selectedCategoryPath || '未选择' }}</b></div>
         <div class="option-line"><span>商品位置</span><b>{{ selectedPoi?.name || '未选择' }}</b></div>
-        <div class="option-line"><span>规格能力</span><b>{{ skuEnabled ? '多规格' : '单规格' }}</b></div>
         <div class="option-line"><span>总库存</span><b>{{ totalStock }}件</b></div>
         <div class="option-line"><span>运费模式</span><b>{{ shippingLabel }}</b></div>
       </CardPanel>
@@ -803,19 +778,6 @@ const form = reactive({
   supportSelfPick: false,
 })
 
-// === SKU 多规格 ===
-const skuEnabled = ref(false)
-const skus = reactive([
-  { name: '规格组合 1', price: '', originalPrice: '', stock: '' },
-])
-function addSku() {
-  skus.push({ name: '规格组合 ' + (skus.length + 1), price: '', originalPrice: '', stock: '' })
-}
-function removeSku(idx) {
-  if (skus.length <= 1) return
-  skus.splice(idx, 1)
-}
-
 // === 运费设置 ===
 const shippingMode = ref('free')
 function setShipping(mode) {
@@ -1007,14 +969,8 @@ function clearPoi() {
 // 已改用 amapInputTips 统一请求，不再需要本地 request 封装
 
 const selectedAccount = computed(() => accountName(accounts.value.find(a => String(a.id) === String(form.accountId)) || {}))
-const displayPrice = computed(() => {
-  if (skuEnabled.value && skus.length > 0 && skus[0].price) return skus[0].price
-  return form.price || '0.00'
-})
-const totalStock = computed(() => {
-  if (skuEnabled.value) return skus.reduce((sum, s) => sum + (Number(s.stock) || 0), 0)
-  return Number(form.stock) || 0
-})
+const displayPrice = computed(() => form.price || '0.00')
+const totalStock = computed(() => Number(form.stock) || 0)
 const confirmationPayload = computed(() => publishIntent.payload || {
   xianyuAccountId: Number(form.accountId),
   title: form.title,
@@ -1328,8 +1284,8 @@ async function submit() {
   if (!ok) return
   submitting.value = true
   try {
-    const finalPrice = skuEnabled.value && skus[0]?.price ? skus[0].price : form.price
-    const finalStock = skuEnabled.value ? totalStock.value : (Number(form.stock) || 1)
+    const finalPrice = form.price
+    const finalStock = Number(form.stock) || 1
     const shippingMap = { free: true, fixed: false, none: false }
     const freeShipping = shippingMap[shippingMode.value] ?? true
 
@@ -1879,8 +1835,6 @@ onMounted(load)
   .shipping-item {
     padding: 6px 0;
   }
-  /* SKU 表格横向滚动 */
-  .sku-table,
   :deep(.base-table) {
     display: block;
     overflow-x: auto;

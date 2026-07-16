@@ -93,6 +93,30 @@ def _parse_order_amount(total_price: Any, unit_price: Any, quantity: int) -> str
     return "0.00"
 
 
+def _detect_bargain_from_buttons(item: dict[str, Any]) -> bool:
+    """检测订单是否为小刀订单：btnList 中存在 tradeAction=SKIP_PIN。
+
+    参考商业版 order_service._parse_sold_order_item 的小刀判断逻辑。
+    递归搜索整个订单数据，不依赖固定的层级位置。
+    """
+    def search(obj: Any) -> bool:
+        if isinstance(obj, dict):
+            btn_list = obj.get("btnList")
+            if isinstance(btn_list, list):
+                for btn in btn_list:
+                    if isinstance(btn, dict) and btn.get("tradeAction") == "SKIP_PIN":
+                        return True
+            for v in obj.values():
+                if search(v):
+                    return True
+        elif isinstance(obj, list):
+            for v in obj:
+                if search(v):
+                    return True
+        return False
+    return search(item)
+
+
 def _parse_remote_order_item(item: dict[str, Any]) -> Optional[dict[str, Any]]:
     """解析闲鱼 mtop 返回的单条订单数据，参考商业版 _parse_remote_sold_order_item。"""
     if not isinstance(item, dict):
@@ -146,6 +170,7 @@ def _parse_remote_order_item(item: dict[str, Any]) -> Optional[dict[str, Any]]:
         "confirm_time": _parse_order_time(common.get("endTime") or common.get("confirmTime")),
         "buyer_message": _text(common.get("buyerMessage") or common.get("leaveMessage")),
         "item_id": goods_id_raw,  # String 列，保留原始字符串
+        "is_bargain": _detect_bargain_from_buttons(item),
         # 订单项
         "items": [
             {
@@ -187,7 +212,7 @@ async def _upsert_order(db: AsyncSession, account_id: int, parsed: dict[str, Any
             confirm_time=parsed["confirm_time"],
             buyer_message=parsed["buyer_message"],
             item_id=parsed["item_id"],
-            is_bargain=0,
+            is_bargain=1 if parsed.get("is_bargain") else 0,
             is_rated=0,
             is_red_flower=0,
             deleted=0,
@@ -215,6 +240,9 @@ async def _upsert_order(db: AsyncSession, account_id: int, parsed: dict[str, Any
             order.buyer_message = parsed["buyer_message"]
         if parsed["item_id"]:
             order.item_id = parsed["item_id"]
+        # 小刀标记：只置 True 不回退（参考商业版 order_service 逻辑）
+        if parsed.get("is_bargain") and not order.is_bargain:
+            order.is_bargain = 1
         order.updated_time = datetime.datetime.now()
         action = "updated"
 
