@@ -2,6 +2,7 @@
   <div class="dashboard-page">
     <div class="dashboard-grid">
       <div class="dashboard-main">
+        <OnboardingChecklist @navigate="onOnboardingNavigate" />
         <section v-if="totalSlides > 0" class="hero-card">
           <div class="hero-viewport">
             <div class="hero-track" :style="{ transform: `translateX(-${currentSlide * 100}%)` }">
@@ -237,6 +238,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import CardPanel from '../components/CardPanel.vue'
 import Icon from '../components/Icon.vue'
+import OnboardingChecklist from '../components/OnboardingChecklist.vue'
 import { getCarouselList } from '../api/carousel'
 import { getTextAds } from '../api/ads.js'
 import {
@@ -248,6 +250,10 @@ import { getNavigationNotifications, getNavigationOverview, getNavigationSystemS
 import { openExternalUrl } from '../utils/externalUrl.js'
 
 const emit = defineEmits(['navigate'])
+
+function onOnboardingNavigate(routeKey) {
+  emit('navigate', routeKey)
+}
 
 const carousels = ref([])
 const currentSlide = ref(0)
