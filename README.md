@@ -88,6 +88,52 @@
 | _店铺爬取_ | _根据店铺链接爬取商品_ | _并可进行AI搬运润色、生图、发布_ |
 | _工作流_ | _自动根据设定规则发布商品_ | _可一次性发布多个账号，多个商品_ |
 
+## 🚀 3 分钟快速上手
+
+> 适合第一次使用的用户。脚本会自动生成随机 secrets、检测端口冲突，无需手动配置任何密码文件。
+
+### 前置要求
+- Docker 24+ 与 Docker Compose v2（[安装 Docker](https://docs.docker.com/get-docker/)）
+- 一台 Linux / macOS / Windows 机器
+
+### 步骤
+
+1. **克隆仓库**
+   ```bash
+   git clone https://github.com/xianyu-assistant-opensource/xianyu-assistant-opensource.git
+   cd xianyu-assistant-opensource
+   ```
+
+2. **一键启动**（脚本会在首次运行时自动调用设置向导）
+   ```bash
+   sh ./start.sh          # Linux/macOS
+   # 或 .\start.bat       # Windows PowerShell
+   ```
+
+   向导会自动：
+   - 检测 Docker 是否安装
+   - 在 `./secrets/` 目录生成随机 secret 文件
+   - 校验 `docker compose` 配置
+   - 启动所有服务并等待健康
+
+3. **访问服务**
+
+   打开浏览器访问 http://localhost:8080
+
+   - 默认账号：`admin`
+   - 首次启动时，请按终端提示用 bcrypt 生成你自己的密码 hash 替换 `./secrets/admin-password-hash`
+
+### 常见问题
+
+| 问题 | 解决方法 |
+|---|---|
+| 端口 8080 被占用 | 修改 `.env` 中的 `WEB_PORT=8081` 后重新启动 |
+| 拉取 GHCR 镜像慢 | 进入"关于我们"页检查更新，切换镜像源 |
+| 忘记 admin 密码 | 重新生成 bcrypt hash 写入 `./secrets/admin-password-hash` 后重启 |
+| 想更新到最新版 | 进入"关于我们"页 → 点击"检查更新" → 复制脚本执行 |
+
+---
+
 ## 🧱 技术架构
 
 | 层级 | 技术 |
