@@ -29,13 +29,17 @@ const XIANYU_ERROR_MAP = {
 
 // 关键词 → 友好提示（用于模糊匹配）
 const KEYWORD_PATTERNS = [
-  { pattern: /cookie.*过期|cookie.*invalid|登录已失效/i, message: '登录已失效，请重新扫码或更新 Cookie' },
+  { pattern: /cookie.*过期|cookie.*invalid|登录已失效|token.*失效/i, message: '登录已失效，请在账号管理页点击"重新登录"获取新 Token' },
+  { pattern: /database.*error|数据库连接失败|mysql.*refused|mysql.*timeout/i, message: '数据库连接失败，请检查 .env 中 MYSQL_HOST、MYSQL_PORT、MYSQL_USER、MYSQL_PASSWORD 是否正确' },
+  { pattern: /redis.*refused|redis.*timeout|redis.*connect/i, message: 'Redis 连接失败，请检查 REDIS_HOST、REDIS_PASSWORD 配置；可临时关闭 Redis 使用内存缓存' },
+  { pattern: /websocket.*close|websocket.*disconnect|ws.*断开|消息连接断开/i, message: '消息连接已断开，5 秒后会自动重连，如长时间未恢复请检查网络' },
   { pattern: /network|econnrefused|etimedout|econnreset/i, message: '网络连接失败，请检查网络或服务状态' },
   { pattern: /timeout|超时/i, message: '请求超时，请稍后重试' },
   { pattern: /not found|404|资源不存在/i, message: '请求的资源不存在' },
   { pattern: /forbidden|403|无权限|权限不足/i, message: '暂无权限执行此操作' },
   { pattern: /rate.?limit|限流|频繁/i, message: '操作过于频繁，请稍后再试' },
   { pattern: /server error|500|502|503|504|服务异常|系统繁忙/i, message: '服务暂时不可用，请稍后重试' },
+  { pattern: /sync.*fail|同步失败|同步.*失败/i, message: '同步失败，请检查账号 Cookie 状态，或前往"账号管理"重新登录' },
 ]
 
 /**
