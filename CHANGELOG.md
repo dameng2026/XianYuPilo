@@ -14,6 +14,11 @@
 - **在线消息页面客户订单板块**：会话侧边栏新增客户订单卡片（封面、状态徽章、金额、订单详情入口）；新增 getCustomerOrders API；后端 /orders 接口支持 buyerId 过滤
 - **发布商品基础设施**：新增 requestLifecycle.js（createRequestGate 请求竞态保护）、imageUploadPolicy.js（图片上传预校验）、publishAddress.js（地址标准化工具）、PublishAddressCascader.vue（三级地址级联选择器）、safeMediaUrl.js（可信媒体 URL 校验）
 - **发货记录页面数据完整性**：后端 SQL 补齐 purchase_time/goods_cover_pic/seller_name/seller_display_name/goods_id 字段；JOIN xianyu_account 表获取卖家信息；前端新增商品缩略图列（含 onGoodsThumbError 容错）、卖家列、购买时间列；详情面板新增外部订单号/商品ID/卖家/购买时间字段
+- **一键检查 GitHub 更新**：在"关于我们"页新增"版本更新检查"卡片，自动识别 Docker / 源码部署方式，生成对应更新脚本，支持镜像源切换（GHCR / 阿里云 ACR / 离线 tar.gz）和"我已执行完成，刷新页面"按钮；后端新增 `GET /system/update-info`、`POST /system/update-feedback` 端点，带 6 小时缓存和 GitHub API 失败兜底
+- **新手部署向导**：新增 `scripts/setup-wizard.sh` 与 `setup-wizard.ps1`，首次启动自动检测 Docker、生成随机 secrets、校验配置、启动服务；`start.sh` / `start.bat` 在缺少 `.env` 或 `./secrets/` 时自动调用向导
+- **首次登录引导清单**：`DashboardPage` 顶部接入 `OnboardingChecklist`，通过 `localStorage` 持久化完成状态，支持"不再提示"按钮；自动检查 `/system/runtime-status` 同步模型配置完成情况
+- **README 快速上手章节**：新增"3 分钟快速上手"章节，包含前置要求、3 步启动、常见问题表格，新手无需阅读生产部署详细文档即可上手
+- **错误文案带下一步建议**：`friendlyError.js` 扩展数据库/Redis/WebSocket/Token 失效/同步失败等错误的文案，直接告诉用户"下一步该怎么做"
 
 ### 优化
 - **商品管理页面健壮性**：pollSyncProgress 增加连续失败熔断（3次即抛错）与严格响应校验（status 白名单/pct 范围[0,100]/对象类型校验）；init 改为分步容错加载（账号失败不阻塞后续）；loadGoodsStats 严格校验排除 null/undefined/空字符串；syncAllAccounts 进度防倒退（删除每账号 progress=0 重置）；batchDeleteProducts 增加 warnings 分类（remote_confirmed/warn 类型记为需人工核对而非失败）
