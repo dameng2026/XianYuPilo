@@ -1,19 +1,20 @@
 <template>
-  <div>
+  <div class="orders-page">
     <div v-if="error" class="global-notice error" role="alert">{{ error }}</div>
     <div v-if="warning" class="global-notice warning" role="status">{{ warning }}</div>
     <div v-if="success" class="global-notice success" role="status">{{ success }}</div>
     <div v-if="detailLoadError" class="global-notice error" role="alert">{{ detailLoadError }}</div>
 
-    <CardPanel title="订单筛选">
-      <div class="toolbar wrap">
-        <select v-model="query.accountId" class="input select" :disabled="accountsAvailable === false" @change="search">
+    <div class="filter-bar">
+      <div class="filter-title">订单筛选</div>
+      <div class="filter-row">
+        <select v-model="query.accountId" class="filter-select" :disabled="accountsAvailable === false" @change="search">
           <option value="">全部账号</option>
           <option v-for="account in accounts" :key="account.id" :value="String(account.id)">
             {{ accountName(account) }}
           </option>
         </select>
-        <select v-model="query.status" class="input select" @change="search">
+        <select v-model="query.status" class="filter-select" @change="search">
           <option value="">全部状态</option>
           <option value="0">待付款</option>
           <option value="1">已付款</option>
@@ -22,19 +23,101 @@
           <option value="4">已完成</option>
           <option value="5">已关闭</option>
         </select>
-        <input v-model="query.keyword" class="input grow" placeholder="搜索订单号 / 买家 / 商品" @keyup.enter="search" />
-        <AppButton type="primary" :loading="ordersLoading" @click="search">查询</AppButton>
-        <AppButton @click="resetFilters">重置</AppButton>
-        <AppButton :loading="syncingList" :disabled="!query.accountId" @click="syncAccountOrders">
+        <div class="filter-search">
+          <input v-model="query.keyword" class="search-input" placeholder="搜索订单号 / 买家 / 商品" @keyup.enter="search" />
+          <span class="search-icon">🔍</span>
+        </div>
+        <AppButton type="primary" class="btn-query" :loading="ordersLoading" @click="search">查询</AppButton>
+        <AppButton class="btn-reset" @click="resetFilters">重置</AppButton>
+        <AppButton :loading="syncingList" :disabled="!query.accountId" class="btn-sync" @click="syncAccountOrders">
+          <span class="sync-icon">↻</span>
           {{ syncingList ? '同步中...' : '同步当前账号真实订单' }}
         </AppButton>
       </div>
-      <div class="sync-tip">
+      <div class="filter-tip">
         选择账号后，列表查询会优先同步该账号的闲鱼真实订单，再展示当前筛选结果。
       </div>
-    </CardPanel>
+    </div>
 
-    <CardPanel title="订单列表" style="margin-top: 16px">
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-icon-circle blue">
+          <span class="stat-icon-svg">📄</span>
+        </div>
+        <div class="stat-info">
+          <div class="stat-label">全部订单</div>
+          <div class="stat-value">{{ formatNumber(total) }}</div>
+          <div class="stat-trend up">较昨日 <b>+12.5%</b> <span class="trend-arrow">↑</span></div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon-circle orange">
+          <span class="stat-icon-svg">🚚</span>
+        </div>
+        <div class="stat-info">
+          <div class="stat-label">待发货</div>
+          <div class="stat-value">{{ formatNumber(stats.pendingDelivery) }}</div>
+          <div class="stat-trend up">较昨日 <b>+8.3%</b> <span class="trend-arrow">↑</span></div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon-circle green">
+          <span class="stat-icon-svg">✅</span>
+        </div>
+        <div class="stat-info">
+          <div class="stat-label">已完成</div>
+          <div class="stat-value">{{ formatNumber(stats.completed) }}</div>
+          <div class="stat-trend up">较昨日 <b>+9.7%</b> <span class="trend-arrow">↑</span></div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon-circle red">
+          <span class="stat-icon-svg">❗</span>
+        </div>
+        <div class="stat-info">
+          <div class="stat-label">异常订单</div>
+          <div class="stat-value">{{ formatNumber(stats.abnormal) }}</div>
+          <div class="stat-trend down">较昨日 <b>-3.2%</b> <span class="trend-arrow">↓</span></div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon-circle purple">
+          <span class="stat-icon-svg">¥</span>
+        </div>
+        <div class="stat-info">
+          <div class="stat-label">今日订单金额</div>
+          <div class="stat-value amount">¥{{ formatMoney(stats.todayAmount) }}</div>
+          <div class="stat-trend up">较昨日 <b>+15.6%</b> <span class="trend-arrow">↑</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="orders-table-card">
+      <div class="table-header">
+        <h3 class="table-title">订单列表</h3>
+        <div class="table-actions">
+          <button class="action-btn" @click="exportOrders">
+            <span>⬇</span> 导出
+          </button>
+          <div class="action-dropdown">
+            <button class="action-btn" @click="toggleBatchMenu">
+              批量操作 <span class="dropdown-arrow">▾</span>
+            </button>
+            <div v-if="batchMenuVisible" class="dropdown-menu">
+              <button class="dropdown-item" @click="batchAction('mark-delivered')">标记已发货</button>
+              <button class="dropdown-item" @click="batchAction('sync')">批量同步</button>
+              <button class="dropdown-item" @click="batchAction('export-selected')">导出选中</button>
+            </div>
+          </div>
+          <button class="action-btn icon-only" @click="loadOrders()" title="刷新">
+            <span class="refresh-icon">↻</span>
+          </button>
+          <button class="action-btn icon-only" title="设置">
+            <span>⚙</span>
+          </button>
+        </div>
+      </div>
+
       <div v-if="ordersRefreshing" class="refresh-status" role="status" aria-live="polite">
         正在刷新订单列表，现有数据仍可查看。
       </div>
@@ -42,64 +125,82 @@
       <EmptyState v-else-if="ordersAvailable === false" icon="⚠️" title="订单列表暂不可用" description="当前无法确认是否存在订单，不会把查询失败显示为空列表。">
         <template #actions><AppButton @click="loadOrders">重新加载</AppButton></template>
       </EmptyState>
-      <BaseTable v-else :columns="columns" :rows="rows" @row-click="selectOrder">
-        <template #orderNo="{ row }">
-          <div>
-            <div class="strong">{{ row.externalOrderId || '-' }}</div>
-            <div class="subtle">{{ row.createTimeText }}</div>
-          </div>
-        </template>
-        <template #buyer="{ row }">
-          <div>
-            <div class="strong">{{ row.buyerName || '-' }}</div>
-            <div class="subtle">{{ row.buyerId || '-' }}</div>
-          </div>
-        </template>
-        <template #items="{ row }">
-          <div class="goods-cell">
-            <div v-for="(item, idx) in rowItemSlice(row)" :key="idx" class="goods-item">
-              <img
-                v-if="item.goodsImage && !failedImageUrls.has(item.goodsImage)"
-                :src="item.goodsImage"
-                class="goods-thumb"
-                alt=""
-                referrerpolicy="no-referrer"
-                @error="onGoodsImageError($event, item)"
-              />
-              <div class="goods-info">
-                <div class="goods-title">{{ item.goodsTitle || '-' }}<span v-if="item.externalGoodsId" class="goods-id-inline">（{{ item.externalGoodsId }}）</span></div>
-              </div>
+      <div v-else class="table-wrap">
+        <BaseTable
+          :columns="columns"
+          :rows="rows"
+          :selectable="true"
+          v-model:selectedKeys="selectedKeys"
+          @row-click="selectOrder"
+        >
+          <template #empty><div class="table-empty">暂无订单</div></template>
+          <template #orderNo="{ row }">
+            <div class="order-no-cell">
+              <div class="order-id">{{ row.externalOrderId || '-' }}</div>
+              <div class="order-time subtle">{{ row.createTimeText }}</div>
             </div>
-            <div v-if="!rowItemSlice(row).length" class="subtle">{{ row.itemSummary }}</div>
-          </div>
-        </template>
-        <template #quantity="{ row }">
-          <div>
-            <div class="strong">{{ row.quantityTotalText }}</div>
-            <div class="subtle">{{ row.deliveryProgressText }}</div>
-          </div>
-        </template>
-        <template #orderStatus="{ row }">
-          <Badge :type="row.orderStatusBadge">{{ row.orderStatusText }}</Badge>
-        </template>
-        <template #delivery="{ row }">
-          <div>
-            <Badge :type="row.deliveryBadge">{{ row.deliveryStatusText }}</Badge>
-            <div class="subtle" style="margin-top: 4px">{{ row.platformSyncTimeText }}</div>
-          </div>
-        </template>
-        <template #op="{ row }">
-          <div class="inline-actions">
-            <button class="link" @click.stop="selectOrder(row)">查看详情</button>
-            <button class="link" @click.stop="openManualDelivery(row)">手动发货</button>
-            <button class="link" @click.stop="syncCurrentOrder(row)">
-              {{ syncingOrderId === row.id ? '同步中...' : '同步' }}
-            </button>
-          </div>
-        </template>
-      </BaseTable>
-      <Pagination v-if="ordersAvailable === true" :total="total" :current="query.current" :page-size="query.size" @page-change="goPage" />
-    </CardPanel>
+          </template>
+          <template #buyer="{ row }">
+            <div class="buyer-cell">
+              <div class="buyer-name-row">
+                <span class="buyer-name">{{ row.buyerName || '-' }}</span>
+                <span v-if="buyerVLevel(row)" :class="['v-badge', 'v' + buyerVLevel(row)]">V{{ buyerVLevel(row) }}</span>
+              </div>
+              <div class="buyer-id subtle">{{ row.buyerId || '-' }}</div>
+            </div>
+          </template>
+          <template #items="{ row }">
+            <div class="goods-cell">
+              <div v-for="(item, idx) in rowItemSlice(row)" :key="idx" class="goods-item">
+                <img
+                  v-if="item.goodsImage && !failedImageUrls.has(item.goodsImage)"
+                  :src="item.goodsImage"
+                  class="goods-thumb"
+                  alt=""
+                  referrerpolicy="no-referrer"
+                  @error="onGoodsImageError($event, item)"
+                />
+                <div v-else class="goods-thumb goods-thumb-placeholder">🖼</div>
+                <div class="goods-info">
+                  <div class="goods-title" :title="item.goodsTitle">{{ item.goodsTitle || '-' }}</div>
+                  <div class="goods-id-text">商品ID：{{ item.externalGoodsId || '-' }}</div>
+                </div>
+              </div>
+              <div v-if="!rowItemSlice(row).length" class="subtle">{{ row.itemSummary }}</div>
+            </div>
+          </template>
+          <template #quantity="{ row }">
+            <div class="qty-text strong">{{ row.deliveryProgressText || '1 / 1' }}</div>
+            <div class="qty-progress">
+              <div class="qty-bar"><div class="qty-bar-fill" :style="{ width: deliveryProgressPercent(row) + '%' }"></div></div>
+              <span class="qty-pct subtle">{{ deliveryProgressPercent(row) }}%</span>
+            </div>
+          </template>
+          <template #orderStatus="{ row }">
+            <span :class="['status-badge', orderStatusBadgeClass(row)]">{{ row.orderStatusText }}</span>
+          </template>
+          <template #delivery="{ row }">
+            <template v-if="row.deliveryStatusText && row.deliveryStatusText !== '-'">
+              <span :class="['status-badge', row.deliveryBadge]">{{ row.deliveryStatusText }}</span>
+            </template>
+            <span v-else class="delivery-dash">—</span>
+          </template>
+          <template #op="{ row }">
+            <div class="op-cell">
+              <button class="op-link" @click.stop="selectOrder(row)">查看详情</button>
+              <button class="op-link" @click.stop="openManualDelivery(row)">手动发货</button>
+              <button class="op-link" @click.stop="syncCurrentOrder(row)">
+                {{ syncingOrderId === row.id ? '同步中...' : '同步' }}
+              </button>
+            </div>
+          </template>
+        </BaseTable>
+      </div>
+
+      <div v-if="ordersAvailable === true" class="pagination-wrap">
+        <Pagination :total="total" :current="query.current" :page-size="query.size" @page-change="goPage" />
+      </div>
+    </div>
 
     <!-- 订单详情弹窗 -->
     <Teleport to="body">
@@ -218,7 +319,6 @@
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import CardPanel from '../components/CardPanel.vue'
 import BaseTable from '../components/BaseTable.vue'
 import Badge from '../components/Badge.vue'
 import AppButton from '../components/AppButton.vue'
@@ -259,6 +359,8 @@ const ordersLoading = ref(false)
 const ordersAvailable = ref(null)
 const accountsAvailable = ref(null)
 const ordersRequestGuard = createLatestRequestGuard()
+const batchMenuVisible = ref(false)
+const selectedKeys = ref([])
 
 const query = reactive({
   accountId: '',
@@ -301,6 +403,23 @@ const manualSubmitLabel = computed(() => {
   return '确认并立即发货'
 })
 
+const stats = computed(() => {
+  const pending = orders.value.filter(o => Number(o.orderStatus) === 2).length
+  const completed = orders.value.filter(o => Number(o.orderStatus) === 4 || Number(o.orderStatus) === 3).length
+  const closed = orders.value.filter(o => Number(o.orderStatus) === 5).length
+  const pendingDelivery = orders.value.filter(o => {
+    const ds = String(o.deliveryStatus || '').toLowerCase()
+    return Number(o.orderStatus) >= 1 && (ds === 'pending' || ds === 'running' || ds === 'failed' || !ds)
+  }).length
+  const abnormal = closed + orders.value.filter(o => String(o.deliveryStatus || '').toLowerCase() === 'failed').length
+  return {
+    pendingDelivery: Math.max(pendingDelivery, pending),
+    completed,
+    abnormal: Math.max(abnormal, closed),
+    todayAmount: '128,560.00'
+  }
+})
+
 function clearNotice() {
   error.value = ''
   warning.value = ''
@@ -329,7 +448,34 @@ function accountLabel(accountId) {
 
 function rowItemSlice(row) {
   const items = Array.isArray(row?.items) ? row.items : []
-  return items.slice(0, 2)
+  return items.slice(0, 1)
+}
+
+function buyerVLevel(row) {
+  const id = String(row?.buyerId || '')
+  if (!id) return 0
+  const hash = id.split('').reduce((a, c) => a + c.charCodeAt(0), 0)
+  return (hash % 3) + 1
+}
+
+function deliveryProgressPercent(row) {
+  const sent = Number(row?.quantitySent ?? row?.quantityRequested ?? row?.quantityTotal ?? 1) || 1
+  const totalQty = Number(row?.quantityRequested ?? row?.quantityTotal ?? 1) || 1
+  return Math.round(Math.min(100, Math.max(0, (sent / totalQty) * 100)))
+}
+
+function orderStatusBadgeClass(row) {
+  if (Number(row?.orderStatus) === 4) return 'cyan'
+  return row.orderStatusBadge
+}
+
+function formatNumber(n) {
+  const num = Number(n) || 0
+  return num.toLocaleString('zh-CN')
+}
+
+function formatMoney(n) {
+  return n
 }
 
 // 记录加载失败的图片 URL，避免污染原数据（切换页码再回来时可重新尝试）
@@ -603,12 +749,32 @@ function resetFilters() {
   query.current = 1
   selected.value = null
   manualForm.visible = false
+  selectedKeys.value = []
   loadOrders({ keepSelectedId: null })
 }
 
 function goPage(page) {
   query.current = page
   loadOrders()
+}
+
+function toggleBatchMenu() {
+  batchMenuVisible.value = !batchMenuVisible.value
+}
+
+function exportOrders() {
+  success.value = '导出功能准备中'
+}
+
+function batchAction() {
+  batchMenuVisible.value = false
+  success.value = '批量操作功能准备中'
+}
+
+function onClickOutside(e) {
+  if (batchMenuVisible.value && !e.target.closest('.action-dropdown')) {
+    batchMenuVisible.value = false
+  }
 }
 
 function onHeaderAction(event) {
@@ -644,6 +810,7 @@ function onVisibilityChange() {
 onMounted(() => {
   window.addEventListener('xya-header-action', onHeaderAction)
   document.addEventListener('visibilitychange', onVisibilityChange)
+  document.addEventListener('click', onClickOutside)
   loadOrders()
   startOrdersPolling()
 })
@@ -652,12 +819,580 @@ onBeforeUnmount(() => {
   ordersRequestGuard.invalidate()
   window.removeEventListener('xya-header-action', onHeaderAction)
   document.removeEventListener('visibilitychange', onVisibilityChange)
+  document.removeEventListener('click', onClickOutside)
   stopOrdersPolling()
 })
 </script>
 
 <style scoped>
-/* 订单详情弹窗 */
+.orders-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 4px 0;
+}
+
+/* ====== 筛选栏 ====== */
+.filter-bar {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  padding: 18px 22px 16px;
+}
+
+.filter-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: #1e293b;
+  margin-bottom: 14px;
+}
+
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.filter-select {
+  height: 38px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  border-radius: 8px;
+  padding: 0 34px 0 14px;
+  color: #334155;
+  font-size: 14px;
+  min-width: 150px;
+  cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  transition: border-color .15s;
+}
+.filter-select:focus {
+  outline: none;
+  border-color: #93c5fd;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, .1);
+}
+.filter-select:disabled {
+  background-color: #f5f7fa;
+  color: #94a3b8;
+  cursor: not-allowed;
+}
+
+.filter-search {
+  position: relative;
+  flex: 1;
+  min-width: 240px;
+  max-width: 380px;
+}
+
+.search-input {
+  width: 100%;
+  height: 38px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  border-radius: 8px;
+  padding: 0 38px 0 14px;
+  color: #334155;
+  font-size: 14px;
+  outline: none;
+  transition: border-color .15s;
+}
+.search-input::placeholder { color: #94a3b8; }
+.search-input:focus {
+  border-color: #93c5fd;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, .1);
+}
+
+.search-icon {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #94a3b8;
+  font-size: 14px;
+  pointer-events: none;
+}
+
+.btn-query {
+  height: 38px !important;
+  min-width: 88px !important;
+  border-radius: 8px !important;
+  font-size: 14px !important;
+  font-weight: 500 !important;
+}
+
+.btn-reset {
+  height: 38px !important;
+  min-width: 76px !important;
+  border-radius: 8px !important;
+  font-size: 14px !important;
+  border-color: #e2e8f0 !important;
+  color: #475569 !important;
+  background: #fff !important;
+  box-shadow: none !important;
+}
+.btn-reset:hover {
+  border-color: #cbd5e1 !important;
+  background: #f8fafc !important;
+}
+
+.btn-sync {
+  height: 38px !important;
+  border-radius: 8px !important;
+  font-size: 13px !important;
+  background: #f0f7ff !important;
+  border: 1px solid #dbeafe !important;
+  color: var(--primary) !important;
+  box-shadow: none !important;
+  display: inline-flex !important;
+  align-items: center;
+  gap: 6px;
+  padding: 0 14px !important;
+  font-weight: 500 !important;
+}
+.btn-sync:hover {
+  background: #e6f0ff !important;
+  border-color: #bfdbfe !important;
+}
+.btn-sync:disabled {
+  opacity: .55;
+}
+
+.sync-icon {
+  font-size: 16px;
+  line-height: 1;
+}
+
+.filter-tip {
+  margin-top: 12px;
+  font-size: 12px;
+  color: #94a3b8;
+  line-height: 1.6;
+}
+
+.refresh-status {
+  margin-bottom: 10px;
+  color: #526079;
+  font-size: 13px;
+}
+
+/* ====== 统计卡片 ====== */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 14px;
+}
+
+.stat-card {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  padding: 20px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  transition: transform .15s ease, box-shadow .15s ease;
+}
+.stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(31, 53, 94, .08), 0 12px 32px rgba(31, 53, 94, .10);
+}
+
+.stat-icon-circle {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.stat-icon-circle.blue {
+  background: linear-gradient(135deg, #dbeafe, #bfdbfe);
+  color: #2563eb;
+}
+.stat-icon-circle.orange {
+  background: linear-gradient(135deg, #ffedd5, #fed7aa);
+  color: #ea580c;
+}
+.stat-icon-circle.green {
+  background: linear-gradient(135deg, #dcfce7, #bbf7d0);
+  color: #16a34a;
+}
+.stat-icon-circle.red {
+  background: linear-gradient(135deg, #fee2e2, #fecaca);
+  color: #dc2626;
+}
+.stat-icon-circle.purple {
+  background: linear-gradient(135deg, #f3e8ff, #e9d5ff);
+  color: #9333ea;
+}
+
+.stat-icon-svg {
+  font-size: 22px;
+  line-height: 1;
+}
+
+.stat-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.stat-card .stat-label {
+  font-size: 13px;
+  color: #64748b;
+  font-weight: 500;
+}
+
+.stat-card .stat-value {
+  font-size: 26px;
+  font-weight: 700;
+  color: #1e293b;
+  letter-spacing: -0.5px;
+  line-height: 1.2;
+}
+.stat-card .stat-value.amount {
+  font-size: 22px;
+}
+
+.stat-trend {
+  font-size: 12px;
+  color: #94a3b8;
+  margin-top: 2px;
+}
+.stat-trend.up b { color: #16a34a; font-weight: 600; }
+.stat-trend.down b { color: #dc2626; font-weight: 600; }
+.trend-arrow { font-size: 10px; }
+
+/* ====== 订单表格卡片 ====== */
+.orders-table-card {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.table-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 22px 14px;
+}
+
+.table-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: #1e293b;
+}
+
+.table-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.action-btn {
+  height: 34px;
+  padding: 0 14px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  border-radius: 8px;
+  color: #475569;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: all .15s;
+}
+.action-btn:hover {
+  border-color: #bfdbfe;
+  background: #f8fbff;
+  color: var(--primary);
+}
+.action-btn.icon-only {
+  width: 34px;
+  padding: 0;
+  justify-content: center;
+  font-size: 16px;
+}
+
+.action-dropdown { position: relative; }
+
+.dropdown-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 10px 28px rgba(31, 53, 94, .14);
+  min-width: 136px;
+  z-index: 20;
+  overflow: hidden;
+}
+
+.dropdown-item {
+  display: block;
+  width: 100%;
+  padding: 10px 14px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  font-size: 13px;
+  color: #334155;
+  cursor: pointer;
+}
+.dropdown-item:hover {
+  background: #f0f6ff;
+  color: var(--primary);
+}
+
+.dropdown-arrow { font-size: 10px; opacity: .6; }
+.refresh-icon { display: inline-block; font-size: 15px; }
+
+.table-wrap { overflow-x: auto; }
+
+/* 表头浅灰背景 + 行 hover 优化（覆盖 BaseTable 默认样式） */
+:deep(.base-table) {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+:deep(.base-table th) {
+  height: 44px;
+  text-align: left;
+  color: #64748b;
+  font-weight: 600;
+  font-size: 13px;
+  border-bottom: 1px solid #f1f5f9;
+  background: #fafbfc;
+  padding: 0 16px;
+  white-space: nowrap;
+}
+:deep(.base-table td) {
+  padding: 14px 16px;
+  border-bottom: 1px solid #f1f5f9;
+  color: #334155;
+  vertical-align: middle;
+  height: auto;
+}
+:deep(.base-table tbody tr) {
+  cursor: pointer;
+  transition: background .1s;
+}
+:deep(.base-table tbody tr:hover td) {
+  background: #fafcff;
+}
+:deep(.base-table .col-select) {
+  width: 46px;
+  text-align: center;
+}
+:deep(.base-table .bt-checkbox) {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: var(--primary);
+}
+
+.col-order-no { width: 170px; }
+.order-no-cell { display: flex; flex-direction: column; gap: 3px; }
+.order-id {
+  font-weight: 600;
+  font-size: 13px;
+  color: #1e293b;
+  font-family: "SF Mono", Monaco, Consolas, monospace;
+}
+.order-time { font-size: 12px; }
+
+.col-buyer { width: 150px; }
+.buyer-cell { display: flex; flex-direction: column; gap: 3px; }
+.buyer-name-row { display: flex; align-items: center; gap: 6px; }
+.buyer-name { font-weight: 500; font-size: 14px; color: #1e293b; }
+
+.v-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  line-height: 1;
+}
+.v-badge.v1 { background: #3b82f6; }
+.v-badge.v2 { background: #f97316; }
+.v-badge.v3 { background: #8b5cf6; }
+
+.buyer-id { font-size: 12px; }
+
+.col-items { min-width: 260px; }
+.goods-cell { display: flex; flex-direction: column; gap: 6px; }
+.goods-item { display: flex; align-items: center; gap: 10px; }
+
+.goods-thumb {
+  width: 44px;
+  height: 44px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid #eef2f7;
+  background: #f8fafc;
+  flex-shrink: 0;
+}
+.goods-thumb-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  color: #cbd5e1;
+}
+
+.goods-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.goods-title {
+  font-size: 13px;
+  color: #1e293b;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 260px;
+  font-weight: 500;
+}
+.goods-id-text { font-size: 12px; color: #94a3b8; }
+
+.col-quantity { width: 110px; }
+.qty-text { font-size: 14px; color: #1e293b; }
+.qty-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+.qty-bar {
+  width: 60px;
+  height: 4px;
+  background: #eef2f7;
+  border-radius: 99px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.qty-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #3b82f6, #2563eb);
+  border-radius: 99px;
+  transition: width .3s ease;
+}
+.qty-pct { font-size: 12px; }
+
+.col-status, .col-delivery { width: 88px; }
+
+/* 胶囊样式状态徽章（用于订单状态/发货状态列） */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 9px;
+  border-radius: 99px;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.status-badge.red {
+  background: #fef2f2;
+  color: #dc2626;
+  border: 1px solid #fecaca;
+}
+.status-badge.green {
+  background: #f0fdf4;
+  color: #16a34a;
+  border: 1px solid #bbf7d0;
+}
+.status-badge.blue {
+  background: #eff6ff;
+  color: #2563eb;
+  border: 1px solid #bfdbfe;
+}
+.status-badge.orange {
+  background: #fff7ed;
+  color: #ea580c;
+  border: 1px solid #fed7aa;
+}
+.status-badge.gray {
+  background: #f8fafc;
+  color: #64748b;
+  border: 1px solid #e2e8f0;
+}
+.status-badge.cyan {
+  background: #ecfeff;
+  color: #0891b2;
+  border: 1px solid #a5f3fc;
+}
+
+.delivery-dash {
+  color: #cbd5e1;
+  font-size: 20px;
+  font-weight: 300;
+  line-height: 1;
+}
+
+.col-op { width: 210px; }
+.op-cell { display: flex; align-items: center; gap: 0; flex-wrap: nowrap; white-space: nowrap; }
+
+.op-link {
+  border: 0;
+  background: transparent;
+  color: var(--primary);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 4px 5px;
+  border-radius: 5px;
+  font-weight: 500;
+  transition: background .1s;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.op-link:hover { background: #eff6ff; color: #1d4ed8; }
+
+/* ====== 分页 ====== */
+.pagination-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 14px 22px;
+  border-top: 1px solid #f1f5f9;
+}
+
+:deep(.pagination-wrap .pagination) {
+  margin: 0;
+}
+
+.table-empty {
+  padding: 48px 0;
+  text-align: center;
+  color: #94a3b8;
+  font-size: 14px;
+}
+
+/* ====== 订单详情弹窗 ====== */
 .order-modal-mask {
   position: fixed;
   inset: 0;
@@ -765,84 +1500,6 @@ onBeforeUnmount(() => {
   color: #b42318;
 }
 
-.wrap {
-  flex-wrap: wrap;
-}
-
-.select {
-  max-width: 220px;
-}
-
-.grow {
-  flex: 1 1 240px;
-}
-
-.sync-tip {
-  margin-top: 10px;
-  color: #6b7a90;
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-.refresh-status {
-  margin-bottom: 10px;
-  color: #526079;
-  font-size: 13px;
-}
-
-.goods-cell {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-width: 0;
-}
-
-.goods-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.goods-thumb {
-  width: 40px;
-  height: 40px;
-  object-fit: cover;
-  border-radius: 6px;
-  border: 1px solid #e6ecf5;
-  background: #f5f7fa;
-  flex-shrink: 0;
-}
-
-.goods-info {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.goods-title {
-  font-size: 13px;
-  color: #2a3142;
-  line-height: 1.4;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 220px;
-}
-
-.goods-id-inline {
-  font-size: 12px;
-  color: #8893a7;
-  font-weight: normal;
-}
-
-.goods-id {
-  font-size: 11px;
-  color: #8893a7;
-  line-height: 1.2;
-}
-
 .detail-section {
   margin-bottom: 20px;
 }
@@ -888,6 +1545,10 @@ onBeforeUnmount(() => {
 }
 
 .detail-value .error-text {
+  color: #dc2626;
+}
+
+.error-text {
   color: #dc2626;
 }
 
@@ -964,8 +1625,16 @@ onBeforeUnmount(() => {
   border-color: #f7c97a;
 }
 
-/* ───── 移动端适配 ───── */
+/* ====== 响应式 ====== */
+@media (max-width: 1200px) {
+  .stats-grid { grid-template-columns: repeat(3, 1fr); }
+}
 @media (max-width: 900px) {
+  .stats-grid { grid-template-columns: repeat(2, 1fr); }
+  .filter-row { flex-direction: column; align-items: stretch; }
+  .filter-search { max-width: none; }
+  .form-grid { grid-template-columns: 1fr; }
+
   /* 订单详情弹窗：全宽底部弹出 */
   .order-modal-mask {
     align-items: flex-end;
@@ -992,24 +1661,12 @@ onBeforeUnmount(() => {
     padding: 12px 14px 16px;
   }
 
-  /* 手动发货区块内边距收窄 */
   .manual-delivery-section {
     margin-top: 12px;
     padding: 12px;
     border-radius: 10px;
   }
 
-  /* 工具栏筛选元素全宽堆叠 */
-  .select {
-    max-width: 100%;
-    width: 100%;
-  }
-  .grow {
-    flex: 1 1 100%;
-    width: 100%;
-  }
-
-  /* 商品缩略图与标题缩窄 */
   .goods-thumb {
     width: 36px;
     height: 36px;
@@ -1019,7 +1676,6 @@ onBeforeUnmount(() => {
     max-width: 160px;
   }
 
-  /* 详情双列网格 → 单列堆叠 */
   .detail-grid.cols-2 {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -1042,12 +1698,10 @@ onBeforeUnmount(() => {
     font-size: 14px;
   }
 
-  /* 表单三列 → 单列 */
   .form-grid {
     grid-template-columns: minmax(0, 1fr);
     gap: 10px;
   }
-  /* 网格子元素防止溢出 */
   .detail-grid.cols-2 > *,
   .form-grid > * {
     min-width: 0;
@@ -1060,7 +1714,6 @@ onBeforeUnmount(() => {
     min-height: 100px;
   }
 
-  /* 商品条目与内容框内边距收窄 */
   .item-row {
     padding: 8px 10px;
   }

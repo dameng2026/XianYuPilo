@@ -3,6 +3,51 @@
     <div v-if="error" class="global-notice error">{{ error }}</div>
     <div v-if="success" class="global-notice success">{{ success }}</div>
 
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-icon-circle blue"><span class="stat-icon-svg">📦</span></div>
+        <div class="stat-info">
+          <div class="stat-label">货源总数</div>
+          <div class="stat-value">{{ sourceTotal }}</div>
+          <div class="stat-trend muted">统一管理的货源条目</div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon-circle green"><span class="stat-icon-svg">📝</span></div>
+        <div class="stat-info">
+          <div class="stat-label">文本发货</div>
+          <div class="stat-value">{{ sourceTotal }}</div>
+          <div class="stat-trend muted">固定文案直接发送</div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon-circle purple"><span class="stat-icon-svg">🔗</span></div>
+        <div class="stat-info">
+          <div class="stat-label">已配置商品</div>
+          <div class="stat-value">{{ totalConfiguredCount }}</div>
+          <div class="stat-trend muted">货源绑定商品总数</div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon-circle orange"><span class="stat-icon-svg">🏷</span></div>
+        <div class="stat-info">
+          <div class="stat-label">可选商品</div>
+          <div class="stat-value">{{ candidateLibraryTotal }}</div>
+          <div class="stat-trend muted">可配置的商品池规模</div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon-circle" :class="aiStatus.configured ? 'green' : 'gray'"><span class="stat-icon-svg">{{ aiStatus.configured ? '✓' : '!' }}</span></div>
+        <div class="stat-info">
+          <div class="stat-label">AI 推荐</div>
+          <div class="stat-value">{{ aiStatus.configured ? '可用' : '未配置' }}</div>
+          <div class="stat-trend" :class="aiStatus.configured ? 'muted' : 'down'">
+            {{ aiStatus.configured ? 'AI 模型已就绪' : '请先配置通用模型' }}
+          </div>
+        </div>
+      </div>
+    </div>
+
     <CardPanel title="货源库">
       <div class="toolbar">
         <input v-model="query.keyword" class="input" placeholder="搜索标题 / 正文 / 备注" :disabled="sourcesLoading || Boolean(mutationBusy)" @keyup.enter="searchSources" />
@@ -334,6 +379,10 @@ const goodsColumns = [
 ]
 
 const configuredGoodsIds = computed(() => new Set(configuredGoods.value.map(row => String(row.id))))
+
+const totalConfiguredCount = computed(() => {
+  return rows.value.reduce((sum, row) => sum + (Number(row.usageCount) || 0), 0)
+})
 
 const normalizedConfiguredGoods = computed(() => decorateGoodsRows(configuredGoods.value, false))
 const normalizedAllGoods = computed(() => decorateGoodsRows(allGoods.value, false))
@@ -950,6 +999,57 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 14px;
+  margin-bottom: 16px;
+}
+.stat-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  background: #fff;
+  border: 1px solid #e8eef8;
+  border-radius: 12px;
+  box-shadow: 0 1px 2px rgba(31,53,94,.04);
+}
+.stat-icon-circle {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+}
+.stat-icon-circle.blue { background: #e6f4ff; color: #0d6bff; }
+.stat-icon-circle.green { background: #ecfdf3; color: #067647; }
+.stat-icon-circle.orange { background: #fff7e6; color: #d97706; }
+.stat-icon-circle.purple { background: #f3e8ff; color: #7c3aed; }
+.stat-icon-circle.red { background: #fef2f2; color: #dc2626; }
+.stat-icon-circle.gray { background: #f5f7fa; color: #64748b; }
+.stat-info { min-width: 0; flex: 1; }
+.stat-label {
+  font-size: 12px;
+  color: #667085;
+  margin-bottom: 2px;
+}
+.stat-value {
+  font-size: 22px;
+  font-weight: 700;
+  color: #15223a;
+  line-height: 1.2;
+}
+.stat-trend {
+  font-size: 11px;
+  margin-top: 2px;
+}
+.stat-trend.muted { color: #94a3b8; }
+.stat-trend.down { color: #dc2626; }
+
 .content-preview {
   max-width: 520px;
   white-space: nowrap;
@@ -1057,6 +1157,30 @@ onBeforeUnmount(() => {
 
 /* ───── 移动端适配 ───── */
 @media (max-width: 900px) {
+  /* 统计网格：5 列 → 2 列堆叠 */
+  .stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+  }
+  .stat-card {
+    padding: 10px 12px;
+    gap: 10px;
+  }
+  .stat-icon-circle {
+    width: 34px;
+    height: 34px;
+    font-size: 16px;
+  }
+  .stat-value {
+    font-size: 18px;
+  }
+  .stat-label {
+    font-size: 11px;
+  }
+  .stat-trend {
+    font-size: 10px;
+  }
+
   /* 货源正文预览宽度收窄并允许换行 */
   .content-preview {
     max-width: 100%;

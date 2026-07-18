@@ -8,6 +8,9 @@
     </div>
 
     <div v-if="error" class="global-notice error">{{ error }}</div>
+    <div v-if="dependenciesError" class="global-notice warn">{{ dependenciesError }}</div>
+    <div v-if="statsError" class="global-notice warn">{{ statsError }}</div>
+    <div v-if="sourcesError" class="global-notice warn">{{ sourcesError }}</div>
     <div v-if="success" class="global-notice success">{{ success }}</div>
 
     <div class="stat-row">
@@ -286,7 +289,7 @@
 
           <div class="config-modal-footer">
             <AppButton @click="closeConfig">取消</AppButton>
-            <AppButton type="primary" :loading="configSaving" @click="saveConfig">保存配置</AppButton>
+            <AppButton type="primary" :loading="configSaving" :disabled="configSaveDisabled" @click="saveConfig">保存配置</AppButton>
           </div>
           </div>
         </div>
@@ -338,7 +341,7 @@
         </div>
         <div class="toolbar" style="justify-content:flex-end">
           <AppButton @click="showBatchDialog = false">取消</AppButton>
-          <AppButton type="primary" :loading="batchLoading" @click="submitBatch">确认执行</AppButton>
+          <AppButton type="primary" :loading="batchLoading" :disabled="batchSubmitDisabled" @click="submitBatch">确认执行</AppButton>
         </div>
       </div>
     </div>
@@ -378,6 +381,9 @@ const textSources = ref([])
 const allGoods = ref([])
 const error = ref('')
 const success = ref('')
+const statsError = ref('')
+const sourcesError = ref('')
+const dependenciesError = ref('')
 const statsAvailable = ref(false)
 const goodsAvailable = ref(false)
 const sourcesAvailable = ref(null)
@@ -488,6 +494,27 @@ const filteredConfigUnknownCount = computed(() => (
   filteredGoods.value.filter(goods => goods._configUnavailable).length
 ))
 
+const hasUnavailableGoods = computed(() => filteredConfigUnknownCount.value > 0)
+
+const configSaveDisabled = computed(() => {
+  if (!configTarget.value) return true
+  if (configTarget.value.goods?._configUnavailable) return true
+  if (configForm.mode === 'card') {
+    if (configForm.cardSource === 'existing' && cardGroupsAvailable.value === false) return true
+    if (configForm.cardSource === 'existing' && !configForm.cardGroupId) return true
+    if (configForm.cardSource === 'direct' && cardKeyCount.value === 0) return true
+  }
+  if (configForm.mode === 'text' && configForm.sourceId && sourcesAvailable.value === false) return true
+  return false
+})
+
+const batchSubmitDisabled = computed(() => {
+  if (!goodsAvailable.value || hasUnavailableGoods.value) return true
+  if (!filteredGoods.value.length) return true
+  if (batchForm.mode === 'card' && (!batchForm.cardGroupId || cardGroupsAvailable.value === false)) return true
+  return false
+})
+
 const tableRows = computed(() => {
   const start = (current.value - 1) * pageSize.value
   return filteredGoods.value.slice(start, start + pageSize.value).map(goods => ({
@@ -541,6 +568,7 @@ function statusDotClass(cfg) {
 
 async function loadStats() {
   statsAvailable.value = false
+  statsError.value = ''
   try {
     const res = await getDeliveryStats()
     const data = res.data || {}
@@ -552,8 +580,8 @@ async function loadStats() {
       enabledGoods: data.enabledGoods || 0
     })
     statsAvailable.value = true
-  } catch {
-    appendError('自动发货统计暂不可用，未加载指标以“—”显示。')
+  } catch (e) {
+    statsError.value = `自动发货统计暂不可用，未加载指标以"—"显示。${e.message ? ` ${e.message}` : ''}`
   }
 }
 
@@ -570,30 +598,33 @@ function appendError(message) {
 
 async function loadSources() {
   sourcesAvailable.value = null
+  sourcesError.value = ''
   try {
     const res = await getDeliverySources({ current: 1, size: 200 })
     textSources.value = recordsOf(res.data)
     sourcesAvailable.value = true
-  } catch {
+  } catch (e) {
     textSources.value = []
     sourcesAvailable.value = false
-    appendError('文本货源库暂不可用。')
+    sourcesError.value = `文本货源库暂不可用。${e.message ? ` ${e.message}` : ''}`
   }
 }
 
 async function loadAll() {
   error.value = ''
+  dependenciesError.value = ''
   const [accountResult, cardResult] = await Promise.allSettled([
     getAccounts({ page: 1, pageSize: 200 }),
     getCards({ size: 200 })
   ])
+  const depErrors = []
   if (accountResult.status === 'fulfilled') {
     accounts.value = recordsOf(accountResult.value.data)
     accountsAvailable.value = true
   } else {
     accounts.value = []
     accountsAvailable.value = false
-    appendError('账号筛选暂不可用。')
+    depErrors.push('账号筛选暂不可用')
   }
   if (cardResult.status === 'fulfilled') {
     cardGroups.value = recordsOf(cardResult.value.data)
@@ -601,7 +632,10 @@ async function loadAll() {
   } else {
     cardGroups.value = []
     cardGroupsAvailable.value = false
-    appendError('卡密分组暂不可用。')
+    depErrors.push('卡密分组暂不可用')
+  }
+  if (depErrors.length) {
+    dependenciesError.value = `${depErrors.join('；')}。相关筛选与卡密发货可能受影响。`
   }
   await Promise.allSettled([loadSources(), loadGoods(), loadStats()])
 }
@@ -611,10 +645,13 @@ async function loadGoods() {
   try {
     current.value = 1
     const fetchSize = 500
+    const validEnabledValues = [true, false, 0, 1]
+    const validModeValues = ['text', 'card']
     const withConfig = []
     let page = 1
     let expectedPages = 1
     let configFailures = 0
+    let invalidConfigs = 0
     do {
       const res = await getGoods({ current: page, size: fetchSize })
       const list = recordsOf(res.data)
@@ -633,10 +670,31 @@ async function loadGoods() {
       for (const goods of list) {
         const hasConfigResult = configMap.has(String(goods.id))
         if (!hasConfigResult && configMap.size) configFailures += 1
+        let configUnavailable = goodsIds.length > 0 && !hasConfigResult
+        let configData = hasConfigResult ? configMap.get(String(goods.id)) : {}
+        if (configData && typeof configData === 'object') {
+          for (const timingKey of ['payDelivery', 'confirmDelivery', 'reviewDelivery']) {
+            const timing = configData[timingKey]
+            if (timing && typeof timing === 'object' && Object.keys(timing).length > 0) {
+              const enabled = timing.enabled
+              const mode = timing.mode
+              if (enabled !== undefined && !validEnabledValues.includes(enabled)) {
+                configUnavailable = true
+                invalidConfigs += 1
+                break
+              }
+              if (mode !== undefined && mode !== '' && !validModeValues.includes(mode)) {
+                configUnavailable = true
+                invalidConfigs += 1
+                break
+              }
+            }
+          }
+        }
         withConfig.push({
           ...goods,
-          _config: hasConfigResult ? configMap.get(String(goods.id)) : {},
-          _configUnavailable: goodsIds.length > 0 && !hasConfigResult
+          _config: configData,
+          _configUnavailable: configUnavailable
         })
       }
       if (!list.length || list.length < fetchSize) break
@@ -646,6 +704,7 @@ async function loadGoods() {
     allGoods.value = withConfig
     goodsAvailable.value = true
     if (configFailures) appendError(`${configFailures} 个商品的发货配置暂不可用。`)
+    if (invalidConfigs) appendError(`${invalidConfigs} 个商品的发货配置字段异常（enabled 或 mode 非法），已标记为不可用。`)
     const focusedGoodsId = consumeFocusedGoodsId()
     if (focusedGoodsId) {
       const target = withConfig.find(goods => String(goods.id) === String(focusedGoodsId))
@@ -911,9 +970,16 @@ async function batchDelete() {
 
 async function scanPendingOrders() {
   try {
-    await scanApi()
+    const res = await scanApi()
+    const scanned = res?.data
+    if (scanned !== undefined && scanned !== null) {
+      if (!Number.isSafeInteger(Number(scanned))) {
+        throw new Error('待发货订单扫描响应格式异常，未返回有效数量。')
+      }
+    }
     await loadStats()
-    success.value = '已触发待发货订单扫描，请前往发货记录页查看结果。'
+    const countText = Number.isSafeInteger(Number(scanned)) ? `（本次扫描 ${Number(scanned)} 条）` : ''
+    success.value = `已触发待发货订单扫描${countText}，请前往发货记录页查看结果。`
   } catch (e) {
     error.value = e.message || '扫描失败'
   }
@@ -1102,6 +1168,18 @@ onBeforeUnmount(() => {
   padding: 0;
   display: flex;
   flex-direction: column;
+  animation: config-modal-in .22s ease-out;
+}
+
+@keyframes config-modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .config-modal h3 {

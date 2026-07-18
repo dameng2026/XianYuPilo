@@ -71,6 +71,8 @@
               v-if="row.goodsCoverPic"
               :src="row.goodsCoverPic"
               alt=""
+              loading="lazy"
+              referrerpolicy="no-referrer"
               class="goods-thumb"
               @error="onGoodsThumbError(row, $event)"
             />

@@ -69,6 +69,7 @@
     @retry="retryGlobalRequest"
   />
   <ConfirmModal />
+  <DraftGuardModal />
 </template>
 
 <script setup>
@@ -78,6 +79,7 @@ import Topbar from './components/Topbar.vue'
 import PageHeader from './components/PageHeader.vue'
 import AppButton from './components/AppButton.vue'
 import ConfirmModal from './components/ConfirmModal.vue'
+import DraftGuardModal from './components/DraftGuardModal.vue'
 import AppStatusCenter from './components/AppStatusCenter.vue'
 import MobileLite from './components/MobileLite.vue'
 import NotFoundPage from './pages/NotFoundPage.vue'
@@ -90,6 +92,7 @@ import { closeSse, connectSse } from './utils/sse.js'
 import { installClientErrorReporter, recordClientError } from './utils/errorReporter.js'
 import { playIncomingMessageSound, primeAudioOnFirstGesture } from './utils/notifySound.js'
 import { DEFAULT_PAGE, NOT_FOUND_PAGE, resolveHashRoute } from './utils/routeState.js'
+import { runNavigationGuard, clearNavigationGuard } from './utils/navigationGuard.js'
 import {
   createGlobalRequestNotice,
   retainGlobalNoticeForRoute,
@@ -142,6 +145,7 @@ const pageMap = {
   'delivery-records': asyncPage(() => import('./pages/DeliveryRecordsPage.vue')),
   'scheduled-tasks': asyncPage(() => import('./pages/ScheduledTasksPage.vue')),
   'auto-reply': asyncPage(() => import('./pages/AutoReplyPage.vue')),
+  'slider-solve-records': asyncPage(() => import('./pages/SliderSolveRecordsPage.vue')),
   logs: asyncPage(() => import('./pages/LogsPage.vue')),
   feedback: asyncPage(() => import('./pages/FeedbackPage.vue')),
   'ad-application': asyncPage(() => import('./pages/AdApplicationPage.vue')),
@@ -282,7 +286,11 @@ function onOnline() {
   if (recovered) showNotice('网络连接已恢复，可以继续操作。', 'success')
 }
 
-function navigate(key) {
+async function navigate(key, options = {}) {
+  if (!options.force) {
+    const allowed = await runNavigationGuard()
+    if (!allowed) return
+  }
   const requested = key || defaultPage
   const known = isKnownPage(requested)
   const next = known ? requested : NOT_FOUND_PAGE
@@ -412,8 +420,9 @@ async function handleLogout() {
     clearAuth()
   }
   closeSse()
+  clearNavigationGuard()
   currentUserInfo.value = { username: '管理员', avatar: '/xya/chat_ui_assets/chat_ui_assets_023.png' }
-  navigate('login')
+  navigate('login', { force: true })
 }
 
 async function boot() {
@@ -453,8 +462,9 @@ function onAuthExpired() {
   if (loggingIn.value) return
   clearAuth()
   closeSse()
+  clearNavigationGuard()
   showNotice('登录已过期，请重新登录', 'warn')
-  navigate('login')
+  navigate('login', { force: true })
 }
 
 function onCaptchaRequired() {

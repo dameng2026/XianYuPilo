@@ -230,42 +230,10 @@
             <label>分组名称 <span class="required">*</span></label>
             <input v-model="editForm.groupName" class="input" placeholder="例如：月卡VIP" />
           </div>
-          <div class="form-row">
-            <label>卡密类型</label>
-            <select v-model="editForm.cardType" class="input">
-              <option value="unique">唯一卡密</option>
-              <option value="card_password">卡号+密码</option>
-              <option value="link_code">链接+提取码</option>
-              <option value="account_password">账号+密码</option>
-              <option value="custom">自定义文本</option>
-            </select>
-          </div>
-          <div class="form-row">
-            <label>卡号前缀（可选）</label>
-            <input v-model="editForm.cardPrefix" class="input" placeholder="例如：VIP-" />
-          </div>
-          <div class="form-row">
-            <label>密码前缀（可选）</label>
-            <input v-model="editForm.passwordPrefix" class="input" placeholder="例如：PWD-" />
-          </div>
-          <div class="form-row">
-            <label>成本单价</label>
-            <input v-model.number="editForm.costPrice" type="number" step="0.01" min="0" class="input" placeholder="0.00" />
-          </div>
-          <div class="form-row">
-            <label>售价建议</label>
-            <input v-model.number="editForm.suggestedPrice" type="number" step="0.01" min="0" class="input" placeholder="0.00" />
-          </div>
-          <div class="form-row">
-            <label>库存预警阈值</label>
-            <input v-model.number="editForm.alertThreshold" type="number" min="0" class="input" placeholder="10" />
-          </div>
-          <div class="form-row">
-            <label>状态</label>
-            <select v-model.number="editForm.status" class="input">
-              <option :value="1">启用</option>
-              <option :value="0">禁用</option>
-            </select>
+          <div v-if="!editForm.id" class="form-row" style="grid-column:1/-1">
+            <label>卡密 <span class="subtle">（每行一条，输入100行即100个卡密）</span></label>
+            <textarea v-model="editForm.cardKeys" class="input card-keys-textarea" rows="10" placeholder="在此输入卡密，每行一条&#10;例如：&#10;VIP-AAAA-BBBB&#10;VIP-CCCC-DDDD&#10;支持格式：卡密内容&#10;卡号----密码&#10;卡号,密码"></textarea>
+            <span class="subtle" style="margin-top:4px">{{ cardKeyCount }} 条卡密</span>
           </div>
           <div class="form-row" style="grid-column:1/-1">
             <label>备注</label>
@@ -367,14 +335,8 @@ const saving = ref(false)
 const editForm = reactive({
   id: null,
   groupName: '',
-  cardType: 'unique',
-  cardPrefix: '',
-  passwordPrefix: '',
-  costPrice: 0,
-  suggestedPrice: 0,
-  alertThreshold: 10,
-  remark: '',
-  status: 1
+  cardKeys: '',
+  remark: ''
 })
 
 // ─── Card Type Labels ───
@@ -450,6 +412,10 @@ function groupsMetric(value) {
 
 const bulkCount = computed(() => {
   return bulkText.value.split(/\n+/).map(s => s.trim()).filter(Boolean).length
+})
+
+const cardKeyCount = computed(() => {
+  return editForm.cardKeys.split(/\n+/).map(s => s.trim()).filter(Boolean).length
 })
 
 const itemPages = computed(() => Math.max(1, Math.ceil(itemTotal.value / pageSize)))
@@ -534,28 +500,16 @@ async function selectGroup(g) {
 function openCreateDialog() {
   editForm.id = null
   editForm.groupName = ''
-  editForm.cardType = 'unique'
-  editForm.cardPrefix = ''
-  editForm.passwordPrefix = ''
-  editForm.costPrice = 0
-  editForm.suggestedPrice = 0
-  editForm.alertThreshold = 10
+  editForm.cardKeys = ''
   editForm.remark = ''
-  editForm.status = 1
   editDialogVisible.value = true
 }
 
 function openEditDialog(group) {
   editForm.id = group.id
   editForm.groupName = group.groupName || ''
-  editForm.cardType = group.cardType || 'unique'
-  editForm.cardPrefix = group.cardPrefix || ''
-  editForm.passwordPrefix = group.passwordPrefix || ''
-  editForm.costPrice = Number(group.costPrice || 0)
-  editForm.suggestedPrice = Number(group.suggestedPrice || 0)
-  editForm.alertThreshold = Number(group.alertThreshold || 10)
+  editForm.cardKeys = ''
   editForm.remark = group.remark || ''
-  editForm.status = group.status !== undefined ? group.status : 1
   editDialogVisible.value = true
 }
 
@@ -572,13 +526,46 @@ async function saveGroup() {
   error.value = ''
   success.value = ''
   try {
-    const data = { ...editForm }
+    const data = { groupName: editForm.groupName.trim(), remark: editForm.remark.trim() || null }
     if (editForm.id) {
       await updateCard(editForm.id, data)
       success.value = '卡密分组已更新'
     } else {
-      await createCard(data)
-      success.value = '卡密分组已创建'
+      const res = await createCard(data)
+      const groupId = res?.data
+      // 创建成功后，如果有卡密内容则批量导入
+      const lines = editForm.cardKeys.split(/\n+/).map(s => s.trim()).filter(Boolean)
+      if (lines.length > 0) {
+        if (!groupId) {
+          success.value = '卡密分组已创建，但卡密导入失败：未获取到分组ID'
+        } else {
+          const payload = lines.map(line => {
+            const sepIdx = line.indexOf('----')
+            if (sepIdx > 0) {
+              return { content: line, cardContent: line.slice(0, sepIdx), password: line.slice(sepIdx + 4) }
+            }
+            const commaIdx = line.indexOf(',')
+            if (commaIdx > 0) {
+              return { content: line, cardContent: line.slice(0, commaIdx), password: line.slice(commaIdx + 1) }
+            }
+            const tabIdx = line.indexOf('\t')
+            if (tabIdx > 0) {
+              return { content: line, cardContent: line.slice(0, tabIdx), password: line.slice(tabIdx + 1) }
+            }
+            return { content: line }
+          })
+          const importRes = await batchCreateCardItems(groupId, { items: payload })
+          const resultData = importRes?.data || {}
+          const successCount = Number(resultData.successCount ?? resultData.success ?? 0)
+          const duplicateCount = Number(resultData.duplicateCount ?? resultData.duplicate ?? 0)
+          const failCount = Number(resultData.failCount ?? resultData.fail ?? 0)
+          success.value = `卡密分组已创建，成功导入 ${successCount} 条卡密` +
+            (duplicateCount > 0 ? `，重复 ${duplicateCount} 条` : '') +
+            (failCount > 0 ? `，失败 ${failCount} 条` : '')
+        }
+      } else {
+        success.value = '卡密分组已创建'
+      }
     }
     editDialogVisible.value = false
     await load()
@@ -1119,6 +1106,21 @@ onBeforeUnmount(() => {
 .required { color: #ef4444; }
 
 .subtle { color: #98a2b3; font-size: 13px; }
+
+/* ── 卡密输入框 ── */
+.card-keys-textarea {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.7;
+  min-height: 180px;
+  resize: vertical;
+  transition: border-color .15s, box-shadow .15s;
+}
+.card-keys-textarea:focus {
+  border-color: #2d5bff;
+  box-shadow: 0 0 0 3px rgba(45, 91, 255, .10);
+  outline: none;
+}
 
 /* ───── 移动端适配 ───── */
 @media (max-width: 900px) {

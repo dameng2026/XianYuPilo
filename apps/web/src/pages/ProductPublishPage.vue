@@ -10,6 +10,11 @@
         <pre>{{ persistedIntentSummary }}</pre>
       </div>
 
+      <div class="draft-toolbar">
+        <span class="draft-tip">📝 草稿会自动保存本页已输入内容，仅保留上一次未发布的草稿</span>
+        <button type="button" class="clear-draft-btn" @click="clearAllData">清空数据</button>
+      </div>
+
       <CardPanel title="宝贝基础信息">
         <div class="form-grid">
           <div class="form-row">
@@ -40,7 +45,7 @@
 
         <!-- 图片上传区域 -->
         <div style="margin-top:18px">
-          <b>宝贝图片（{{ form.imageUrls.length }}/10 张，拖拽可调整顺序）</b>
+          <b>宝贝图片（{{ form.imageUrls.length }}/10 张，拖拽可调整顺序，支持 Ctrl+V 粘贴）</b>
           <div class="image-strip" style="margin-top:12px">
             <div
               v-for="(img, idx) in form.imageUrls"
@@ -74,6 +79,28 @@
               @change="onFileSelect"
             >
           </div>
+          <!-- URL 导入封面图 -->
+          <div class="image-url-bar">
+            <input
+              v-model="imageUrlInput"
+              type="url"
+              class="image-url-input"
+              placeholder="粘贴图片 URL（http:// 或 https://）也可导入封面图"
+              :disabled="imageUrlLoading"
+              @keydown.enter.prevent="addImageFromUrl"
+            >
+            <button
+              type="button"
+              class="image-url-btn"
+              :disabled="imageUrlLoading || !imageUrlInput.trim()"
+              @click="addImageFromUrl"
+            >
+              {{ imageUrlLoading ? '导入中...' : 'URL 导入' }}
+            </button>
+          </div>
+          <p class="image-hint subtle">
+            支持 Ctrl+V 直接粘贴剪贴板里的图片，也可在上方输入图片 URL 后点击「URL 导入」。仅支持 JPEG/PNG/GIF/WebP，单张 ≤ 5MB。
+          </p>
         </div>
       </CardPanel>
 
@@ -296,13 +323,13 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import CardPanel from '../components/CardPanel.vue'
 import AppButton from '../components/AppButton.vue'
 import ToggleSwitch from '../components/ToggleSwitch.vue'
 import { getAccounts } from '../api/accounts.js'
 import { publishItem, autoCategory } from '../api/items.js'
-import { uploadImage, amapInputTips } from '../api/misc.js'
+import { uploadImage, uploadImageFromUrl, amapInputTips } from '../api/misc.js'
 import { runtimeConfig } from '../api/system.js'
 import { accountName } from '../utils/format.js'
 import { recordsOf } from '../utils/apiData.js'
@@ -320,6 +347,9 @@ import {
 import { imageUploadValidationMessage } from '../utils/imageUploadPolicy.js'
 import { accountAuthUsable, pickPreferredAccount } from '../utils/accountAuth.js'
 import { resolveTrustedMediaUrl } from '../utils/safeMediaUrl.js'
+import { loadPublishDraft, savePublishDraft, clearPublishDraft } from '../utils/publishDraft.js'
+import { setNavigationGuard, clearNavigationGuard } from '../utils/navigationGuard.js'
+import { promptDraftChoice } from '../composables/draftGuardState.js'
 
 const emit = defineEmits(['navigate'])
 const accounts = ref([])
@@ -1077,6 +1107,109 @@ async function onFileSelect(e) {
   }
 }
 
+// 粘贴图片：监听页面 paste 事件，从剪贴板提取图片文件后调用通用上传逻辑
+async function onPaste(e) {
+  const items = e.clipboardData?.items
+  if (!items || !items.length) return
+  const imageItems = Array.from(items).filter(it => it.type && it.type.startsWith('image/'))
+  if (!imageItems.length) return
+  // 若剪贴板里同时含文本，且当前焦点在输入框/文本域，则放行让浏览器粘贴文本
+  const hasText = Array.from(items).some(it => it.type === 'text/plain' || it.type === 'text/html')
+  const target = e.target
+  const tag = target?.tagName?.toLowerCase?.()
+  const inEditable = tag === 'input' || tag === 'textarea'
+  if (hasText && inEditable) return
+  if (accountsAvailable.value !== true || !form.accountId) {
+    error.value = '请先选择闲鱼账号再粘贴图片'
+    return
+  }
+  if (form.imageUrls.length >= 10) {
+    error.value = '宝贝图片已满 10 张，无法继续粘贴'
+    return
+  }
+  // 拦截粘贴，避免图片被当作文本插入到其他输入框
+  e.preventDefault()
+  const hadNoImages = form.imageUrls.length === 0
+  uploadingImages.value = true
+  try {
+    for (const item of imageItems) {
+      if (form.imageUrls.length >= 10) {
+        error.value = '宝贝图片已满 10 张，已停止粘贴后续图片'
+        break
+      }
+      const rawFile = item.getAsFile()
+      if (!rawFile) continue
+      // 剪贴板图片常无文件名，统一补上扩展名以便校验工具识别
+      const ext = (rawFile.type.split('/')[1] || 'png').toLowerCase()
+      const fileName = rawFile.name || `paste_${Date.now()}.${ext}`
+      const file = new File([rawFile], fileName, { type: rawFile.type })
+      const validationMessage = imageUploadValidationMessage(file)
+      if (validationMessage) {
+        error.value = `粘贴图片 ${file.name} ${validationMessage}`
+        continue
+      }
+      try {
+        const res = await uploadImage(form.accountId || 0, file)
+        if (res.code === 200 && res.data?.url) {
+          form.imageUrls.push(res.data.url)
+        } else {
+          error.value = res.msg || '粘贴图片上传失败'
+        }
+      } catch (err) {
+        error.value = err.message || '图片上传失败'
+      }
+    }
+    if (hadNoImages && form.imageUrls.length > 0) {
+      await triggerAutoCategory()
+    }
+  } finally {
+    uploadingImages.value = false
+  }
+}
+
+// URL 导入封面图：用户输入图片 URL，后端下载后保存到 uploads/images/
+const imageUrlInput = ref('')
+const imageUrlLoading = ref(false)
+
+async function addImageFromUrl() {
+  const url = imageUrlInput.value.trim()
+  if (!url) {
+    error.value = '请输入图片 URL'
+    return
+  }
+  if (!/^https?:\/\//i.test(url)) {
+    error.value = '图片 URL 必须以 http:// 或 https:// 开头'
+    return
+  }
+  if (accountsAvailable.value !== true || !form.accountId) {
+    error.value = '请先选择闲鱼账号再导入图片'
+    return
+  }
+  if (form.imageUrls.length >= 10) {
+    error.value = '宝贝图片已满 10 张，无法继续导入'
+    return
+  }
+  imageUrlLoading.value = true
+  error.value = ''
+  const hadNoImages = form.imageUrls.length === 0
+  try {
+    const res = await uploadImageFromUrl({ url })
+    if (res.code === 200 && res.data?.url) {
+      form.imageUrls.push(res.data.url)
+      imageUrlInput.value = ''
+    } else {
+      error.value = res.msg || 'URL 图片导入失败'
+    }
+  } catch (err) {
+    error.value = err.message || 'URL 图片导入失败'
+  } finally {
+    imageUrlLoading.value = false
+    if (hadNoImages && form.imageUrls.length > 0) {
+      await triggerAutoCategory()
+    }
+  }
+}
+
 function removeImage(idx) {
   form.imageUrls.splice(idx, 1)
 }
@@ -1335,6 +1468,8 @@ async function submit() {
     if (publishRes.code === 200) {
       success.value = '发布成功，平台与本地商品库均已确认。'
       clearPublishIntent()
+      // 发布成功后清除草稿，避免下次进入时恢复已发布内容
+      clearPublishDraft()
       // 浏览器中的待同步标记只是可选的后续 UX，失败不得改写已确认的平台发布结果。
       const pendingSync = markPendingProductSync()
       if (!pendingSync.stored) {
@@ -1368,7 +1503,207 @@ async function submit() {
   }
 }
 
-onMounted(load)
+// ---- 草稿（自动保存 / 恢复 / 清空） ----
+const isRestoring = ref(false)
+let saveTimer = null
+
+const hasDraftData = computed(() => {
+  // accountId 不计入判定，因为会自动选择
+  return !!(form.title.trim()
+    || form.description.trim()
+    || form.imageUrls.length
+    || form.price
+    || form.stock
+    || selectedCategoryName.value
+    || selectedPoi.value)
+})
+
+function serializeCurrentDraft() {
+  return {
+    form: {
+      accountId: form.accountId,
+      title: form.title,
+      description: form.description,
+      imageUrls: [...form.imageUrls],
+      price: form.price,
+      stock: form.stock,
+      supportSelfPick: form.supportSelfPick,
+    },
+    shippingMode: shippingMode.value,
+    category: {
+      name: selectedCategoryName.value,
+      path: selectedCategoryPath.value,
+      pathIds: [level1Id.value, level2Id.value, level3Id.value].filter(Boolean),
+    },
+    poi: selectedPoi.value ? JSON.parse(JSON.stringify(selectedPoi.value)) : null,
+    locationKeyword: locationKeyword.value || '',
+  }
+}
+
+function restoreDraft(draft) {
+  isRestoring.value = true
+  try {
+    const f = draft.form || {}
+    form.accountId = f.accountId || ''
+    form.title = f.title || ''
+    form.description = f.description || ''
+    form.imageUrls = Array.isArray(f.imageUrls) ? [...f.imageUrls] : []
+    form.price = f.price || ''
+    form.stock = f.stock || ''
+    form.supportSelfPick = !!f.supportSelfPick
+    shippingMode.value = draft.shippingMode || 'free'
+    // 分类恢复：优先走级联选择，无 pathIds 时回退到直接设置 name/path
+    const cat = draft.category || {}
+    if (cat.pathIds && cat.pathIds.length) {
+      nextTick(() => {
+        // 试图在分类树中找到对应路径
+        try {
+          if (cat.pathIds[0]) selectLevel1(categories.value.find(c => c.id === cat.pathIds[0]), { manual: false })
+          if (cat.pathIds[1]) selectLevel2(level2List.value.find(c => c.id === cat.pathIds[1]), { manual: false })
+          if (cat.pathIds[2]) selectLevel3(level3List.value.find(c => c.id === cat.pathIds[2]), { manual: false })
+        } catch {
+          selectedCategoryName.value = cat.name || ''
+          selectedCategoryPath.value = cat.path || ''
+        }
+      })
+    } else {
+      selectedCategoryName.value = cat.name || ''
+      selectedCategoryPath.value = cat.path || ''
+    }
+    // POI 位置恢复
+    if (draft.poi) {
+      selectedPoi.value = draft.poi
+      locationKeyword.value = draft.locationKeyword || draft.poi.name || ''
+    }
+  } finally {
+    nextTick(() => { isRestoring.value = false })
+  }
+}
+
+function scheduleAutoSave() {
+  if (isRestoring.value) return
+  if (saveTimer) clearTimeout(saveTimer)
+  saveTimer = setTimeout(() => {
+    if (hasDraftData.value) {
+      savePublishDraft(serializeCurrentDraft())
+    } else {
+      clearPublishDraft()
+    }
+  }, 800)
+}
+
+// 监听表单与分类、位置变化，自动保存草稿（防抖 800ms）
+watch(
+  () => [
+    form.accountId, form.title, form.description, form.price, form.stock,
+    form.supportSelfPick, form.imageUrls.length,
+  ],
+  scheduleAutoSave,
+)
+watch(shippingMode, scheduleAutoSave)
+watch(selectedCategoryName, scheduleAutoSave)
+watch(selectedPoi, scheduleAutoSave, { deep: true })
+watch(locationKeyword, scheduleAutoSave)
+
+function flushDraftBeforeUnload() {
+  if (saveTimer) {
+    clearTimeout(saveTimer)
+    saveTimer = null
+  }
+  // beforeunload 需要立即落盘，不经过防抖
+  if (hasDraftData.value) {
+    savePublishDraft(serializeCurrentDraft())
+  }
+}
+
+// 导航守卫：有未发布数据时弹窗询问是否保存草稿
+async function navigationGuardFn() {
+  if (!hasDraftData.value) return true
+  const choice = await promptDraftChoice({
+    title: '是否保存草稿？',
+    description: '离开后本页已输入的内容将保存为草稿，下次进入可自动恢复。',
+  })
+  if (choice === 'discard') {
+    clearPublishDraft()
+    return true
+  }
+  // save 或未选择（自动保存）
+  savePublishDraft(serializeCurrentDraft())
+  return true
+}
+
+async function clearAllData() {
+  const ok = await confirmAction({
+    title: '清空本页所有数据？',
+    description: '将一键清除已填写的标题、描述、图片、分类、位置、价格等全部内容，且会删除已保存的草稿。此操作不可撤销。',
+    confirmText: '清空',
+    dangerous: true,
+  })
+  if (!ok) return
+  isRestoring.value = true
+  try {
+    form.title = ''
+    form.description = ''
+    form.imageUrls = []
+    form.price = ''
+    form.stock = ''
+    form.supportSelfPick = false
+    shippingMode.value = 'free'
+    selectedCategoryName.value = ''
+    selectedCategoryPath.value = ''
+    level1Id.value = null
+    level2Id.value = null
+    level3Id.value = null
+    level2List.value = []
+    level3List.value = []
+    selectedPoi.value = null
+    locationKeyword.value = ''
+    poiList.value = []
+    categoryKeyword.value = ''
+    autoCategoryCandidates.value = []
+    autoCategoryMessage.value = ''
+    autoSelectedCatId.value = ''
+    aiCategoryMessage.value = ''
+    error.value = ''
+    success.value = ''
+    clearPublishDraft()
+  } finally {
+    isRestoring.value = false
+  }
+}
+
+onMounted(async () => {
+  setNavigationGuard(navigationGuardFn)
+  window.addEventListener('beforeunload', flushDraftBeforeUnload)
+  // 监听全局 paste 事件，支持用户直接 Ctrl+V 粘贴图片作为宝贝图片
+  window.addEventListener('paste', onPaste)
+  await load()
+  // 尝试恢复草稿
+  try {
+    const draft = loadPublishDraft()
+    if (draft && draft.form) {
+      // 验证 accountId 是否仍存在于账号列表，避免引用已删除账号
+      if (draft.form.accountId) {
+        const exists = accounts.value.some(a => String(a.id) === String(draft.form.accountId))
+        if (!exists) draft.form.accountId = ''
+      }
+      restoreDraft(draft)
+      success.value = '已恢复上次未发布的草稿'
+    }
+  } catch {
+    // 草稿恢复失败不影响正常使用
+  }
+})
+
+onBeforeUnmount(() => {
+  clearNavigationGuard()
+  window.removeEventListener('beforeunload', flushDraftBeforeUnload)
+  window.removeEventListener('paste', onPaste)
+  if (saveTimer) {
+    clearTimeout(saveTimer)
+    saveTimer = null
+  }
+})
 </script>
 
 <style scoped>
@@ -1447,6 +1782,58 @@ onMounted(load)
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
+}
+/* URL 导入封面图 */
+.image-url-bar {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  align-items: stretch;
+}
+.image-url-input {
+  flex: 1;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  outline: none;
+  font-size: 13px;
+  transition: border-color 0.15s;
+  background: #fbfdff;
+}
+.image-url-input:focus {
+  border-color: var(--primary, #1677ff);
+  background: #fff;
+}
+.image-url-input:disabled {
+  background: #f3f4f6;
+  cursor: not-allowed;
+}
+.image-url-btn {
+  flex-shrink: 0;
+  padding: 0 18px;
+  border: 1px solid var(--primary, #1677ff);
+  background: var(--primary, #1677ff);
+  color: #fff;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s, transform 0.15s;
+}
+.image-url-btn:hover:not(:disabled) {
+  opacity: 0.92;
+}
+.image-url-btn:disabled {
+  background: #cbd5e1;
+  border-color: #cbd5e1;
+  cursor: not-allowed;
+}
+.image-hint {
+  margin: 8px 2px 0;
+  font-size: 12px;
+  color: #94a3b8;
+  line-height: 1.6;
 }
 /* ---- 分类级联选择器 ---- */
 .category-selector {
@@ -1730,6 +2117,39 @@ onMounted(load)
   opacity: 0.8;
 }
 
+/* ---- 草稿工具栏 ---- */
+.draft-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 10px 14px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+}
+.draft-tip {
+  font-size: 13px;
+  color: #475569;
+}
+.clear-draft-btn {
+  border: 1px solid #fecaca;
+  background: #fef2f2;
+  color: #dc2626;
+  border-radius: 8px;
+  padding: 6px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+.clear-draft-btn:hover {
+  background: #fee2e2;
+  border-color: #fca5a5;
+}
+
 /* === 移动端适配 (max-width: 900px) === */
 @media (max-width: 900px) {
   /* 图片上传卡片：移动端缩小尺寸，更多列数 */
@@ -1740,6 +2160,14 @@ onMounted(load)
   }
   .image-strip {
     gap: 8px;
+  }
+  /* URL 导入封面图：移动端纵向堆叠 */
+  .image-url-bar {
+    flex-direction: column;
+    gap: 6px;
+  }
+  .image-url-btn {
+    padding: 10px 14px;
   }
   /* 分类级联选择器：移动端纵向堆叠三列，避免横向挤压 */
   .cascader-levels {
@@ -1849,6 +2277,19 @@ onMounted(load)
   .product-thumb {
     width: 90px !important;
     height: 68px !important;
+  }
+  /* 草稿工具栏 */
+  .draft-toolbar {
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 10px;
+  }
+  .draft-tip {
+    font-size: 12px;
+  }
+  .clear-draft-btn {
+    padding: 5px 10px;
+    font-size: 12px;
   }
 }
 </style>

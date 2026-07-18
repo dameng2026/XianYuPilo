@@ -101,6 +101,58 @@
             </div>
           </div>
         </CardPanel>
+
+        <CardPanel title="流程说明" style="margin-top:16px">
+          <div class="flow-steps">
+            <div class="flow-step">
+              <span class="step-num">1</span>
+              <span>买家付款，系统收到待发货消息</span>
+            </div>
+            <div class="flow-step">
+              <span class="step-num">2</span>
+              <span>系统自动发送声明文案给买家</span>
+            </div>
+            <div class="flow-step">
+              <span class="step-num">3</span>
+              <span>买家回复"确认" → 系统自动发货</span>
+            </div>
+            <div class="flow-step">
+              <span class="step-num">4</span>
+              <span>买家回复"取消" → 转人工客服，不发货</span>
+            </div>
+            <div class="flow-step">
+              <span class="step-num">5</span>
+              <span>卖家可在发货记录页手动处理待确认记录</span>
+            </div>
+          </div>
+        </CardPanel>
+
+        <CardPanel title="支持的关键词" style="margin-top:16px">
+          <div class="keyword-list">
+            <div class="keyword-group">
+              <div class="keyword-label">买家确认</div>
+              <div class="keyword-tags">
+                <span class="keyword-tag">确认</span>
+                <span class="keyword-tag">确定</span>
+                <span class="keyword-tag">好的</span>
+                <span class="keyword-tag">好</span>
+                <span class="keyword-tag">可以</span>
+                <span class="keyword-tag">同意</span>
+              </div>
+            </div>
+            <div class="keyword-group">
+              <div class="keyword-label">买家取消</div>
+              <div class="keyword-tags">
+                <span class="keyword-tag cancel">取消</span>
+                <span class="keyword-tag cancel">不要了</span>
+                <span class="keyword-tag cancel">退款</span>
+                <span class="keyword-tag cancel">退货</span>
+                <span class="keyword-tag cancel">拒绝</span>
+                <span class="keyword-tag cancel">不同意</span>
+              </div>
+            </div>
+          </div>
+        </CardPanel>
       </div>
     </div>
   </div>
@@ -400,6 +452,70 @@ onBeforeUnmount(() => {
   color: #344054;
   font-size: 13px;
 }
+.flow-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.flow-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 13px;
+  color: #344054;
+  line-height: 1.5;
+}
+.flow-step .step-num {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #0d6bff;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+.keyword-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.keyword-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.keyword-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: #667085;
+}
+.keyword-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.keyword-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 13px;
+  font-size: 12px;
+  font-weight: 600;
+  background: #e6f4ff;
+  color: #0d6bff;
+  border: 1px solid #bae0ff;
+}
+.keyword-tag.cancel {
+  background: #fff1f0;
+  color: #d4380d;
+  border-color: #ffccc7;
+}
 .field-desc {
   color: #667085;
   font-size: 13px;
@@ -520,6 +636,32 @@ onBeforeUnmount(() => {
   }
   .var-desc-text {
     font-size: 13px;
+  }
+
+  /* 流程说明：间距收窄 */
+  .flow-steps {
+    gap: 10px;
+  }
+  .flow-step {
+    font-size: 13px;
+  }
+  .flow-step .step-num {
+    width: 20px;
+    height: 20px;
+    font-size: 11px;
+  }
+
+  /* 关键词标签：换行展示、点击区增大 */
+  .keyword-list {
+    gap: 12px;
+  }
+  .keyword-tags {
+    gap: 6px;
+  }
+  .keyword-tag {
+    height: 28px;
+    padding: 0 10px;
+    font-size: 12px;
   }
 
   .field-desc {

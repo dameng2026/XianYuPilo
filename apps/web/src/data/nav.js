@@ -31,6 +31,7 @@ export const navGroups = [
       { key: 'delivery-records', label: '发货记录', icon: 'record' },
       { key: 'scheduled-tasks', label: '定时任务', icon: 'clock' },
       { key: 'auto-reply', label: '自动回复', icon: 'reply' },
+      { key: 'slider-solve-records', label: '滑块求解', icon: 'shield' },
     ],
   },
   {
@@ -73,6 +74,7 @@ export const pageTitles = {
   'delivery-records': ['发货记录', '追踪自动发货、异常与补发情况'],
   'scheduled-tasks': ['定时任务', '查看和维护定时任务执行计划'],
   'auto-reply': ['自动回复', '配置 AI 自动回复策略、作用域与兜底话术'],
+  'slider-solve-records': ['滑块求解', '查看滑块验证求解记录与状态'],
   logs: ['操作日志', '查看系统操作与关键行为记录'],
   feedback: ['反馈建议', '提交产品建议、Bug 反馈与功能诉求'],
   'ad-application': ['广告申请', '查看真实商业套餐；未配置时提交与支付保持禁用'],
