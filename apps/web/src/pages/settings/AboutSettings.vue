@@ -59,6 +59,8 @@
           </div>
         </div>
 
+        <UpdateChecker />
+
         <div class="main-grid">
           <CardPanel title="更新日志" desc="版本迭代与功能演进记录">
             <div class="changelog">
@@ -174,6 +176,7 @@ import { showLegalNotice } from '../../utils/legalNotice.js'
 import CardPanel from '../../components/CardPanel.vue'
 import Badge from '../../components/Badge.vue'
 import Icon from '../../components/Icon.vue'
+import UpdateChecker from '../../components/UpdateChecker.vue'
 import { getAboutContent } from '../../api/system.js'
 import {
   createDefaultAboutContent,
