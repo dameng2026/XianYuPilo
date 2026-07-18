@@ -234,6 +234,10 @@ class Settings(BaseSettings):
     max_request_body_bytes: int = 12 * 1024 * 1024
     max_upload_bytes: int = 10 * 1024 * 1024
     max_rag_document_bytes: int = 5 * 1024 * 1024
+    # GitHub 仓库地址（owner/repo 格式），用于检查更新
+    github_repo: str = "xianyu-assistant-opensource/xianyu-assistant-opensource"
+    # 阿里云 ACR 镜像源（可选，留空则不展示此镜像源 tab）
+    acr_registry_url: str = ""
     # Only trust forwarded client IP headers when the direct socket peer is in
     # one of these comma-separated IPs/CIDRs.
     trusted_proxy_ips: str = ""
