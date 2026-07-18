@@ -7,3 +7,5 @@ export const getOpenSourceConfig = () => request.get('/system/open-source-config
 export const saveOpenSourceConfig = data => request.put('/system/open-source-config', data)
 export const getRuntimeStatus = () => request.get('/system/runtime-status')
 export const getAboutContent = () => request.get('/system/about-content')
+export const getUpdateInfo = () => request.get('/system/update-info', { timeout: 30000 })
+export const reportUpdateFeedback = data => request.post('/system/update-feedback', data)
