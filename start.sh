@@ -4,11 +4,11 @@ set -eu
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$ROOT_DIR"
 
-if [ ! -f .env ]; then
-  cp .env.example .env
-  chmod 600 .env 2>/dev/null || true
-  echo "Created .env from .env.example. Fill every REQUIRED blank, then run start.sh again." >&2
-  exit 2
+# First-time setup: if .env or ./secrets missing, run the wizard
+if [ ! -f ".env" ] || [ ! -d "./secrets" ]; then
+  echo "检测到首次使用，启动设置向导..."
+  sh "$ROOT_DIR/scripts/setup-wizard.sh"
+  exit $?
 fi
 
 exec sh "$ROOT_DIR/scripts/verify-production.sh" "$@"
