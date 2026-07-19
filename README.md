@@ -91,9 +91,11 @@
 ## 🚀 3 分钟快速上手
 
 > 适合第一次使用的用户。一键脚本会自动生成所有 secrets、bcrypt 密码 hash、`.env` 配置，无需手动创建任何密码文件。
+>
+> 📖 **完整部署教程**（含 Windows/Ubuntu 详细步骤、常见问题、运维命令、进阶配置）：见 [docs/deployment-guide.md](docs/deployment-guide.md)
 
 ### 前置要求
-- Docker 24+ 与 Docker Compose v2（[安装 Docker](https://docs.docker.com/get-docker/)）
+- Docker 24+ 与 Docker Compose v2（[安装 Docker](https://docs.docker.com/get-docker/)；Ubuntu 上若未安装，`start.sh` 会自动安装）
 - 一台 Linux / macOS / Windows 机器（建议 2GB+ 内存）
 
 ### 步骤
