@@ -421,7 +421,87 @@ sh ./start.sh --no-pull
 - **Ubuntu**：参考 [Docker 官方文档](https://docs.docker.com/engine/install/ubuntu/)
 - **Windows**：下载 [Docker Desktop](https://docs.docker.com/desktop/install/windows-install/)
 
-### Q3：镜像拉取失败（denied）
+### Q3：bcrypt hash 生成失败（NAS / 离线环境）
+
+**现象**：setup-wizard 提示"所有 bcrypt 生成方案均失败"，或 `ModuleNotFoundError: No module named 'bcrypt'`。
+
+**原因**：NAS（极空间/群晖）或离线环境下，主机 Python 未装 bcrypt，且 Docker 容器内 `pip install bcrypt` 因网络或编译环境失败。
+
+**解决**：本版本已实现多层兜底，正常情况下会自动处理。若仍失败，按以下顺序尝试：
+
+**方法 A：用 api 镜像兜底生成（推荐）**
+
+`start.sh` / `start.bat` 已内置此兜底逻辑。如果 setup-wizard 生成失败，它会创建空文件作为标记，然后 start 脚本在镜像构建后自动用 api 容器生成：
+
+```bash
+# Linux / macOS
+sh ./start.sh --build    # 强制本地构建，构建后自动用 api 镜像生成 hash
+
+# Windows
+.\start.bat --build
+```
+
+**方法 B：手动安装 bcrypt 后重试**
+
+```bash
+# Linux / macOS
+pip3 install --user bcrypt
+# 或使用国内源加速
+pip3 install --user -i https://pypi.tuna.tsinghua.edu.cn/simple bcrypt
+
+# 验证安装
+python3 -c "import bcrypt; print('OK')"
+
+# 删除空的 hash 文件，重新运行
+rm ./secrets/admin-password-hash
+sh ./start.sh
+
+# Windows
+pip install bcrypt
+del secrets\admin-password-hash
+.\start.bat
+```
+
+**方法 C：手动生成 hash 写入文件**
+
+在任意已安装 bcrypt 的机器上（包括其他 Docker 容器）生成：
+
+```bash
+# 用 Docker 临时容器生成（使用国内源）
+docker run --rm python:3.11-slim sh -c '
+  pip install --quiet --no-cache-dir \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    --trusted-host pypi.tuna.tsinghua.edu.cn \
+    bcrypt && \
+  python -c "import bcrypt; print(bcrypt.hashpw(b\"admin123\", bcrypt.gensalt(rounds=12)).decode())"
+' > ./secrets/admin-password-hash
+
+# 或用 api 镜像生成（如果已构建）
+docker run --rm xianyu-assistant-api python -c \
+  "import bcrypt; print(bcrypt.hashpw(b'admin123', bcrypt.gensalt(rounds=12)).decode())" \
+  > ./secrets/admin-password-hash
+
+# 验证文件内容（应以 $2b$ 开头）
+cat ./secrets/admin-password-hash
+
+# 重新启动
+sh ./start.sh --no-pull
+```
+
+**方法 D：完全重新初始化**
+
+```bash
+# Linux / macOS
+rm -rf secrets .env
+sh ./start.sh
+
+# Windows
+rmdir /s /q secrets
+del .env
+.\start.bat
+```
+
+### Q4：镜像拉取失败（denied）
 
 **现象**：`Error response from daemon: error from registry: denied`
 
@@ -434,7 +514,7 @@ sh ./start.sh --build          # Linux / macOS
 .\start.bat --build            # Windows
 ```
 
-### Q4：忘记 admin 密码
+### Q5：忘记 admin 密码
 
 **解决**：重新生成 bcrypt hash：
 
@@ -450,7 +530,7 @@ sh ./scripts/setup-wizard.sh
 python3 scripts/production_ops.py --env-file .env restart api
 ```
 
-### Q5：局域网其他机器无法访问
+### Q6：局域网其他机器无法访问
 
 **检查项**：
 
@@ -464,7 +544,7 @@ python3 scripts/production_ops.py --env-file .env restart api
    ```
 3. 服务器安全组放行 8080 端口（云服务器）
 
-### Q6：公网访问返回 400 错误
+### Q7：公网访问返回 400 错误
 
 **原因**：`TRUSTED_HOSTS` 默认只允许 `localhost,127.0.0.1,api`，公网 IP 不在白名单中。
 
@@ -480,7 +560,7 @@ TRUSTED_HOSTS=your-domain.com,154.x.x.x,localhost,127.0.0.1,api
 python3 scripts/production_ops.py --env-file .env restart api web
 ```
 
-### Q7：MySQL 启动失败（Permission denied）
+### Q8：MySQL 启动失败（Permission denied）
 
 **现象**：MySQL 容器日志显示 `/run/secrets/mysql_root_password: Permission denied`
 
@@ -493,7 +573,7 @@ chmod 644 ./secrets/*
 python3 scripts/production_ops.py --env-file .env restart mysql
 ```
 
-### Q8：想完全重新初始化
+### Q9：想完全重新初始化
 
 ```bash
 # 备份当前数据（可选）
@@ -510,7 +590,7 @@ rm -rf secrets
 sh ./start.sh
 ```
 
-### Q9：Windows 上 PowerShell 执行策略受限
+### Q10：Windows 上 PowerShell 执行策略受限
 
 **现象**：运行 `start.bat` 时提示 PowerShell 脚本无法执行。
 
@@ -520,7 +600,7 @@ sh ./start.sh
 powershell -ExecutionPolicy Bypass -File .\scripts\setup-wizard.ps1
 ```
 
-### Q10：磁盘空间不足
+### Q11：磁盘空间不足
 
 **现象**：构建或启动时提示 `no space left on device`
 

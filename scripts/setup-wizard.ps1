@@ -100,8 +100,9 @@ if ($needHash) {
 
   $env:ADMIN_PASSWORD = $DefaultAdminPassword
   $hashValue = ""
+  $failedReasons = @()
 
-  # 优先用主机 Python
+  # --- 方案 1：主机 Python + bcrypt（已装） ---
   $pythonCmd = $null
   foreach ($cmd in @("python", "python3", "py")) {
     $found = Get-Command $cmd -ErrorAction SilentlyContinue
@@ -115,26 +116,97 @@ if ($needHash) {
   }
 
   if ($pythonCmd) {
-    $hashValue = & $pythonCmd -c @'
+    Write-Info "  [1/4] 使用主机 $pythonCmd + bcrypt 生成..."
+    try {
+      $hashValue = & $pythonCmd -c @'
 import os, bcrypt
 pw = os.environ["ADMIN_PASSWORD"].encode("utf-8")
 print(bcrypt.hashpw(pw, bcrypt.gensalt(rounds=12)).decode())
-'@
+'@ 2>$null
+      if ($hashValue -and $hashValue.Trim().Length -gt 0) {
+        Write-Ok "  [1/4] 主机 Python bcrypt 生成成功"
+      } else {
+        $failedReasons += "主机 Python bcrypt 调用失败"
+      }
+    } catch {
+      $failedReasons += "主机 Python bcrypt 异常: $_"
+    }
   } else {
-    # 退到 Docker 临时容器
-    Write-Info "主机未安装 Python bcrypt，使用 Docker 临时容器生成..."
-    $hashValue = & docker run --rm -e ADMIN_PASSWORD python:3.11-slim sh -c @"
-pip install --quiet --no-cache-dir bcrypt 2>/dev/null
-python -c 'import os, bcrypt; pw=os.environ[\"ADMIN_PASSWORD\"].encode(); print(bcrypt.hashpw(pw, bcrypt.gensalt(rounds=12)).decode())'
-"@
+    $failedReasons += "主机无 Python bcrypt 包"
+  }
+
+  # --- 方案 2：主机 pip install bcrypt ---
+  if (-not $hashValue -and $pythonCmd) {
+    Write-Info "  [2/4] 尝试 pip install bcrypt..."
+    $pipOutput = & $pythonCmd -m pip install --user --quiet --timeout 60 bcrypt 2>&1
+    $testBcrypt = & $pythonCmd -c "import bcrypt" 2>$null
+    if ($LASTEXITCODE -eq 0) {
+      try {
+        $hashValue = & $pythonCmd -c @'
+import os, bcrypt
+pw = os.environ["ADMIN_PASSWORD"].encode("utf-8")
+print(bcrypt.hashpw(pw, bcrypt.gensalt(rounds=12)).decode())
+'@ 2>$null
+        if ($hashValue -and $hashValue.Trim().Length -gt 0) {
+          Write-Ok "  [2/4] pip install bcrypt 成功并生成 hash"
+        } else {
+          $failedReasons += "pip install 后 bcrypt 调用失败"
+        }
+      } catch {
+        $failedReasons += "pip install 后 bcrypt 异常"
+      }
+    } else {
+      $failedReasons += "pip install bcrypt 失败: $($pipOutput | Select-Object -Last 1)"
+    }
+  }
+
+  # --- 方案 3：Docker 容器 python:3.11-slim ---
+  if (-not $hashValue) {
+    $dockerCmd = Get-Command docker -ErrorAction SilentlyContinue
+    if ($dockerCmd) {
+      Write-Info "  [3/4] 使用 Docker 临时容器生成（python:3.11-slim，首次约 30-60s）..."
+      $dockerOutput = & docker run --rm -e ADMIN_PASSWORD python:3.11-slim sh -c 'pip install --quiet --no-cache-dir --timeout 60 bcrypt 2>&1 && python -c "import os, bcrypt; pw=os.environ[\"ADMIN_PASSWORD\"].encode(); print(bcrypt.hashpw(pw, bcrypt.gensalt(rounds=12)).decode())"' 2>&1
+      # 从输出中提取 bcrypt hash（以 $2 开头的行）
+      $hashValue = ($dockerOutput | Where-Object { $_ -match '^\$2[aby]\$' } | Select-Object -First 1)
+      if ($hashValue -and $hashValue.Trim().Length -gt 0) {
+        Write-Ok "  [3/4] Docker python:3.11-slim 生成成功"
+      } else {
+        $failedReasons += "Docker python:3.11-slim 失败: $($dockerOutput | Select-Object -Last 2 | Select-Object -First 1)"
+      }
+    } else {
+      $failedReasons += "主机未安装 Docker"
+    }
+  }
+
+  # --- 方案 4：Docker 容器 + 国内清华源 ---
+  if (-not $hashValue) {
+    $dockerCmd = Get-Command docker -ErrorAction SilentlyContinue
+    if ($dockerCmd) {
+      Write-Info "  [4/4] 使用国内 PyPI 镜像源重试（清华源）..."
+      $dockerOutput = & docker run --rm -e ADMIN_PASSWORD python:3.11-slim sh -c 'pip install --quiet --no-cache-dir --timeout 60 -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn bcrypt 2>&1 && python -c "import os, bcrypt; pw=os.environ[\"ADMIN_PASSWORD\"].encode(); print(bcrypt.hashpw(pw, bcrypt.gensalt(rounds=12)).decode())"' 2>&1
+      $hashValue = ($dockerOutput | Where-Object { $_ -match '^\$2[aby]\$' } | Select-Object -First 1)
+      if ($hashValue -and $hashValue.Trim().Length -gt 0) {
+        Write-Ok "  [4/4] 国内源 Docker 生成成功"
+      } else {
+        $failedReasons += "Docker 国内源失败: $($dockerOutput | Select-Object -Last 2 | Select-Object -First 1)"
+      }
+    }
   }
 
   Remove-Item Env:ADMIN_PASSWORD -ErrorAction SilentlyContinue
 
-  if (-not $hashValue -or $hashValue.Trim().Length -eq 0) {
-    Write-Die "bcrypt hash 生成失败"
+  if ($hashValue -and $hashValue.Trim().Length -gt 0) {
+    [System.IO.File]::WriteAllText($hashFile, $hashValue.Trim())
+    Write-Ok "admin bcrypt hash 生成完成"
+  } else {
+    # 所有方案失败：不终止脚本，由 start.bat 在镜像构建后用 api 容器兜底生成
+    Write-Warn "所有 bcrypt 生成方案均失败，将延迟到镜像构建后用 api 容器生成"
+    foreach ($reason in $failedReasons) {
+      Write-Warn "  - $reason"
+    }
+    # 创建空文件作为标记，start.bat 会检测并用 api 镜像生成
+    [System.IO.File]::WriteAllText($hashFile, "")
   }
-  [System.IO.File]::WriteAllText($hashFile, $hashValue.Trim())
 }
 
 # ---------- 6. 创建 .env ----------

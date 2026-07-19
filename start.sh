@@ -4,7 +4,19 @@
 #   sh ./start.sh              # 拉取预构建镜像并启动（推荐）
 #   sh ./start.sh --build      # 本地源码构建并启动
 #   sh ./start.sh --no-pull    # 跳过镜像拉取（用本地已有的镜像）
-set -eu
+#
+# 错误兜底策略：
+#   - Docker 未安装 → 自动安装（get.docker.com）
+#   - secrets 生成失败 → setup-wizard.sh 内部多层兜底
+#   - bcrypt hash 生成失败 → 镜像构建后用 api 容器兜底生成
+#   - 镜像拉取失败 → 自动回退到本地源码构建
+#   - 容器启动失败 → 显示异常服务名和日志查看命令
+#   - 健康检查超时 → 显示日志查看命令
+#   - 端口被占用 → 提示修改 WEB_PORT
+#
+# 注意：不使用 `set -e`，因为部署流程中某些步骤失败时有兜底方案，不应立即终止。
+
+set -u
 
 PROJECT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$PROJECT_DIR"
@@ -102,6 +114,62 @@ ensure_docker() {
   ok "Docker 安装完成"
 }
 
+# 用 api 镜像兜底生成 admin bcrypt hash
+# 当 setup-wizard.sh 中所有 bcrypt 生成方案都失败时，此函数在 api 镜像构建后调用
+# api 镜像内一定有 bcrypt（FastAPI 依赖），是最可靠的兜底方案
+generate_admin_hash_with_api_image() {
+  if [ -s "./secrets/admin-password-hash" ]; then
+    # 文件非空，检查是否是有效的 bcrypt hash
+    if grep -qE '^\$2[aby]\$' "./secrets/admin-password-hash" 2>/dev/null; then
+      return 0
+    fi
+  fi
+
+  info "用 api 镜像兜底生成 admin bcrypt hash..."
+  ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin123}"
+  export ADMIN_PASSWORD
+
+  # 获取 api 镜像名（从 docker-compose.yml 或默认值）
+  api_image=$($DOCKER_COMPOSE config --images 2>/dev/null | grep -i 'api' | head -1) || api_image=""
+  if [ -z "$api_image" ]; then
+    api_image="xianyu-assistant-api"
+  fi
+
+  # 用 api 镜像生成 hash
+  hash_value=$(docker run --rm -e ADMIN_PASSWORD "$api_image" python -c '
+import os, bcrypt
+pw = os.environ["ADMIN_PASSWORD"].encode("utf-8")
+print(bcrypt.hashpw(pw, bcrypt.gensalt(rounds=12)).decode())
+' 2>/dev/null) || hash_value=""
+
+  if [ -n "$hash_value" ] && echo "$hash_value" | grep -qE '^\$2[aby]\$'; then
+    printf '%s' "$hash_value" > "./secrets/admin-password-hash"
+    chmod 644 "./secrets/admin-password-hash" 2>/dev/null || true
+    ok "admin bcrypt hash 兜底生成成功（用 api 镜像）"
+    unset ADMIN_PASSWORD
+    return 0
+  else
+    warn "api 镜像兜底生成也失败"
+    unset ADMIN_PASSWORD
+    return 1
+  fi
+}
+
+# 检查端口是否被占用
+check_port_available() {
+  port=$1
+  if command -v ss >/dev/null 2>&1; then
+    if ss -tlnp 2>/dev/null | grep -q ":${port} "; then
+      return 1
+    fi
+  elif command -v netstat >/dev/null 2>&1; then
+    if netstat -tlnp 2>/dev/null | grep -q ":${port} "; then
+      return 1
+    fi
+  fi
+  return 0
+}
+
 print_access_info() {
   # 推断可访问地址
   if [ "$WEB_BIND" = "0.0.0.0" ]; then
@@ -170,10 +238,24 @@ fi
 WEB_PORT="${WEB_PORT:-8080}"
 WEB_BIND="${WEB_BIND_ADDRESS:-0.0.0.0}"
 
+# ---------- 3.5 端口占用检查 ----------
+if ! check_port_available "$WEB_PORT"; then
+  warn "端口 $WEB_PORT 已被占用！"
+  info "解决方法：修改 .env 中的 WEB_PORT=其他端口（如 8081），然后重新运行 sh ./start.sh"
+  info "或检查占用进程：ss -tlnp | grep :${WEB_PORT}"
+  die "端口 $WEB_PORT 被占用，无法启动"
+fi
+
 # ---------- 4. 拉取镜像或本地构建 ----------
+# 先构建/拉取镜像（不启动服务），以便用 api 镜像兜底生成 bcrypt hash
+build_ok=0
 if [ "$DO_BUILD" = "1" ]; then
-  info "本地源码构建并启动..."
-  $DOCKER_COMPOSE up -d --build
+  info "本地源码构建镜像（首次约 5-10 分钟）..."
+  if $DOCKER_COMPOSE build 2>&1; then
+    build_ok=1
+  else
+    die "镜像构建失败。查看错误信息上方输出，或检查网络和磁盘空间"
+  fi
 else
   pull_ok=0
   if [ "$DO_PULL" = "1" ]; then
@@ -187,15 +269,35 @@ else
     fi
   fi
   if [ "$pull_ok" = "1" ]; then
-    info "启动服务..."
-    $DOCKER_COMPOSE up -d
+    build_ok=1
   else
-    info "本地源码构建并启动..."
-    $DOCKER_COMPOSE up -d --build
+    if $DOCKER_COMPOSE build 2>&1; then
+      build_ok=1
+    else
+      die "镜像构建失败。查看错误信息上方输出，或检查网络和磁盘空间"
+    fi
   fi
 fi
 
-# ---------- 5. 等待 Web 健康检查 ----------
+# ---------- 4.5 兜底生成 admin bcrypt hash（用 api 镜像） ----------
+# setup-wizard.sh 中所有 bcrypt 生成方案都失败时，admin-password-hash 为空
+# 此时 api 镜像已经构建好，用它来生成 hash（api 镜像内一定有 bcrypt）
+if [ -f "./secrets/admin-password-hash" ] && [ ! -s "./secrets/admin-password-hash" ]; then
+  generate_admin_hash_with_api_image || {
+    warn "无法生成 admin bcrypt hash，服务可能无法启动"
+    warn "手动生成方法："
+    warn "  1) 安装 bcrypt: pip3 install --user bcrypt"
+    warn "  2) 生成 hash: python3 -c \"import bcrypt; print(bcrypt.hashpw(b'admin123', bcrypt.gensalt(rounds=12)).decode())\" > ./secrets/admin-password-hash"
+    warn "  3) 重新运行: sh ./start.sh --no-pull"
+    die "admin bcrypt hash 生成失败"
+  }
+fi
+
+# ---------- 5. 启动服务 ----------
+info "启动服务..."
+$DOCKER_COMPOSE up -d || die "服务启动失败。查看日志：$DOCKER_COMPOSE logs"
+
+# ---------- 6. 等待 Web 健康检查 ----------
 info "等待服务就绪（最长 3 分钟）..."
 
 # curl 或 wget 二选一
@@ -224,7 +326,10 @@ while [ "$attempt" -lt "$max_attempts" ]; do
       warn "以下服务异常："
       echo "$real_failed" | sed 's/^/    /'
       echo ""
-      info "查看日志：docker compose logs"
+      info "排查步骤："
+      info "  1) 查看异常服务日志：$DOCKER_COMPOSE logs --tail 100 <服务名>"
+      info "  2) 常见原因：端口冲突、内存不足、secrets 文件权限、数据库初始化失败"
+      info "  3) 完全重置：$DOCKER_COMPOSE down -v && rm -rf secrets .env && sh ./start.sh"
       exit 1
     fi
   fi
@@ -255,4 +360,10 @@ while [ "$attempt" -lt "$max_attempts" ]; do
 done
 
 echo ""
-die "服务启动超时。查看日志：docker compose logs --tail 100"
+warn "服务启动超时（3 分钟内未通过健康检查）"
+info "排查步骤："
+info "  1) 查看所有服务状态：$DOCKER_COMPOSE ps"
+info "  2) 查看日志：$DOCKER_COMPOSE logs --tail 200"
+info "  3) 如 MySQL 初始化慢，可等待后重试：$DOCKER_COMPOSE up -d"
+info "  4) 完全重置：$DOCKER_COMPOSE down -v && rm -rf secrets .env && sh ./start.sh"
+die "服务启动超时"
