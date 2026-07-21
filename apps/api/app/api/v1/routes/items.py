@@ -36,12 +36,6 @@ from ....services.goods_off_shelf import (
     SqlGoodsOffShelfStore,
     XianyuGoodsOffShelfGateway,
 )
-from ....services.item_polish import (
-    ItemPolishReconcileDecision,
-    ItemPolishError,
-    ItemPolishModule,
-    build_item_polish_module,
-)
 from ....services.external_operation import (
     ExternalOperationCommand,
     ExternalOperationCoordinator,
@@ -53,47 +47,6 @@ from ....services.external_operation import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/item")
 _item_sync_tasks: set[asyncio.Task[None]] = set()
-
-# 擦亮任务扩展 router（与 router 同 prefix="/item"，但独立注册以便管理）
-polish_router = APIRouter(prefix="/item", tags=["item-polish"])
-
-
-class ItemPolishRequest(BaseModel):
-    model_config = ConfigDict(populate_by_name=True, extra="forbid")
-
-    xianyu_account_id: int = Field(alias="xianyuAccountId", gt=0)
-    idempotency_key: str = Field(alias="idempotencyKey", min_length=8, max_length=128)
-    goods_ids: list[int] = Field(default_factory=list, alias="goodsIds", max_length=100)
-
-
-class ItemPolishReconcileItem(BaseModel):
-    model_config = ConfigDict(populate_by_name=True, extra="forbid")
-
-    goods_id: int = Field(alias="goodsId", gt=0)
-    outcome: Literal["confirmed_polished", "confirmed_not_polished"]
-
-
-class ItemPolishReconcileRequest(BaseModel):
-    model_config = ConfigDict(populate_by_name=True, extra="forbid")
-
-    task_id: str = Field(alias="taskId", min_length=1, max_length=64)
-    verified_in_xianyu_app: StrictBool = Field(alias="verifiedInXianyuApp")
-    items: list[ItemPolishReconcileItem] = Field(min_length=1, max_length=200)
-
-    @model_validator(mode="after")
-    def normalize_items(self):
-        if self.verified_in_xianyu_app is not True:
-            raise ValueError("必须明确确认已在闲鱼 App 中完成核验")
-        normalized: dict[int, ItemPolishReconcileItem] = {}
-        for item in self.items:
-            previous = normalized.get(item.goods_id)
-            if previous is not None and previous.outcome != item.outcome:
-                raise ValueError(
-                    f"商品 {item.goods_id} 存在相互冲突的对账结论"
-                )
-            normalized[item.goods_id] = item
-        self.items = list(normalized.values())
-        return self
 
 
 def _item_sync_done(task: asyncio.Task[None]) -> None:
@@ -136,9 +89,6 @@ def get_goods_off_shelf_coordinator(
         gateway=XianyuGoodsOffShelfGateway(db),
     )
 
-
-def get_item_polish_module() -> ItemPolishModule:
-    return build_item_polish_module(async_session)
 
 def _operation_digest(payload: dict) -> str:
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
@@ -1156,111 +1106,3 @@ async def _is_fish_shop_account(db: AsyncSession, account_id: int) -> bool:
         return False
 
 
-@polish_router.post("/polish")
-async def polish_account_items(
-    req: ItemPolishRequest,
-    module: ItemPolishModule = Depends(get_item_polish_module),
-    current_user: dict = Depends(get_current_user),
-):
-    """Persist and execute one real, duplicate-resistant platform polish intent."""
-
-    try:
-        task = await module.submit(
-            account_id=req.xianyu_account_id,
-            idempotency_key=req.idempotency_key,
-            goods_ids=req.goods_ids,
-        )
-    except ItemPolishError as exc:
-        data = {
-            "status": "failed",
-            "errorCode": exc.error_code,
-            "message": exc.public_message,
-            "retrySafe": False,
-            **exc.data,
-        }
-        return JSONResponse(
-            status_code=exc.http_status,
-            content=ResultObject(
-                code=exc.http_status,
-                msg=exc.public_message,
-                data=data,
-            ).model_dump(by_alias=True),
-        )
-
-    # The shared Web response interceptor accepts successful ResultObject
-    # envelopes only with code=200/0. Pending is a truthful task state, not an
-    # HTTP failure, so keep transport/envelope success and expose state in data.
-    status_code = 409 if task.status == "unknown" else 200
-    return JSONResponse(
-        status_code=status_code,
-        content=ResultObject(
-            code=status_code,
-            msg=task.message,
-            data=task.to_data(),
-        ).model_dump(by_alias=True),
-    )
-
-
-@polish_router.get("/polishProgress/{task_id}")
-async def get_polish_progress(
-    task_id: str,
-    module: ItemPolishModule = Depends(get_item_polish_module),
-    current_user: dict = Depends(get_current_user),
-):
-    """Return persisted progress; expired in-flight calls reconcile to unknown."""
-
-    try:
-        task = await module.progress(task_id)
-    except ItemPolishError as exc:
-        return JSONResponse(
-            status_code=exc.http_status,
-            content=ResultObject(
-                code=exc.http_status,
-                msg=exc.public_message,
-                data={
-                    "status": "not_found" if exc.http_status == 404 else "failed",
-                    "errorCode": exc.error_code,
-                    "message": exc.public_message,
-                    **exc.data,
-                },
-            ).model_dump(by_alias=True),
-        )
-    return ResultObject.success(task.to_data())
-
-
-@polish_router.post("/polish/reconcile")
-async def reconcile_unknown_polish_items(
-    req: ItemPolishReconcileRequest,
-    module: ItemPolishModule = Depends(get_item_polish_module),
-    current_user: dict = Depends(get_current_user),
-):
-    """Persist explicit user-verified outcomes for unknown polish items."""
-
-    try:
-        task = await module.reconcile_unknown(
-            task_id=req.task_id,
-            verified_in_xianyu_app=req.verified_in_xianyu_app,
-            decisions=[
-                ItemPolishReconcileDecision(
-                    goods_id=item.goods_id,
-                    outcome=item.outcome,
-                )
-                for item in req.items
-            ],
-        )
-    except ItemPolishError as exc:
-        return JSONResponse(
-            status_code=exc.http_status,
-            content=ResultObject(
-                code=exc.http_status,
-                msg=exc.public_message,
-                data={
-                    "status": "reconcile_rejected",
-                    "errorCode": exc.error_code,
-                    "message": exc.public_message,
-                    "retrySafe": False,
-                    **exc.data,
-                },
-            ).model_dump(by_alias=True),
-        )
-    return ResultObject.success(task.to_data())

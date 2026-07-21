@@ -372,6 +372,26 @@
             <div class="xya-msg-status-row"><span>作用范围</span><b>{{ aiScopeLabel }}</b></div>
             <div class="xya-msg-status-row"><span>全局主开关</span><b :class="aiSettingsAvailable && aiGlobalEnabled ? 'green' : 'gray'">{{ !aiSettingsAvailable ? '状态未知' : (aiGlobalEnabled ? '已开启' : '已关闭') }}</b></div>
           </div>
+
+          <!-- 会话级自动回复状态机（3 态：运行中 / 人工暂停中 / 手动关闭） -->
+          <div v-if="aiSettingsAvailable && aiAutoReplyEnabled && conversationAutoReplyLoaded" class="xya-msg-conv-state">
+            <div class="xya-msg-status-row">
+              <span>会话级状态</span>
+              <b :class="conversationAutoReplyStatusClass">{{ conversationAutoReplyStatusText }}</b>
+            </div>
+            <div class="xya-msg-status-row">
+              <span>会话级开关</span>
+              <button
+                type="button"
+                class="xya-msg-conv-toggle-btn"
+                :class="conversationAutoReplyButtonClass"
+                :disabled="conversationAutoReplyLoading || !selected?.id"
+                :title="conversationAutoReplyButtonTitle"
+                @click="toggleConversationAutoReply"
+              >{{ conversationAutoReplyButtonText }}</button>
+            </div>
+            <div v-if="conversationAutoReplyHint" class="xya-msg-conv-hint">{{ conversationAutoReplyHint }}</div>
+          </div>
           <button type="button" class="xya-msg-secondary-btn wide" @click="emit('navigate', 'settings-ai-cs')">配置自动回复</button>
         </section>
 
@@ -585,9 +605,12 @@ import {
 import { getBusinessSettings } from '../api/businessSettings.js'
 import {
   getAutoReplyScopeProducts,
-  getAutoReplyScopeStatus,
   updateProductAutoReplyScope,
-  updateAccountAutoReplyScope
+  updateAccountAutoReplyScope,
+  batchUpdateAutoReplyScope,
+  getAutoReplyScopeStatus,
+  toggleConversationAutoReply as toggleConversationAutoReplyApi,
+  getConversationAutoReplyStatus,
 } from '../api/autoReplyScope.js'
 import { queryUserAvatars } from '../api/messages.js'
 import { getCustomerOrders, getOrderDetail } from '../api/orders.js'
@@ -838,6 +861,74 @@ const messageDataAvailable = computed(() => conversationsAvailable.value && cont
 
 // AI 自动回复状态
 const aiAutoReplyEnabled = ref(false)
+
+// 会话级自动回复状态机（同步商业版 V1.13）
+// autoReplyPaused: 0=运行中 1=已暂停
+// autoReplyManualDisabled: 0=可自动恢复 1=手动关闭（禁止自动恢复，仅用户手动开启）
+// runningEnabled: 综合账号级/全局开关 + 会话级暂停后的实际运行状态
+const conversationAutoReplyState = ref({
+  autoReplyPaused: 0,
+  autoReplyManualDisabled: 0,
+  lastManualReplyAt: 0,
+  lastAutoReplyAt: 0,
+  effectiveEnabled: null,
+  runningEnabled: null,
+  pausedReason: '',
+})
+const conversationAutoReplyLoaded = ref(false)
+const conversationAutoReplyLoading = ref(false)
+
+const conversationAutoReplyStatusText = computed(() => {
+  const s = conversationAutoReplyState.value
+  if (s.autoReplyManualDisabled === 1) return '已手动关闭'
+  if (s.autoReplyPaused === 1) return '人工暂停中'
+  if (s.runningEnabled === true) return '运行中'
+  if (s.runningEnabled === false) return '已关闭'
+  return '状态未知'
+})
+
+const conversationAutoReplyStatusClass = computed(() => {
+  const s = conversationAutoReplyState.value
+  if (s.autoReplyManualDisabled === 1) return 'danger-text'
+  if (s.autoReplyPaused === 1) return 'warning-text'
+  if (s.runningEnabled === true) return 'green'
+  return 'gray'
+})
+
+const conversationAutoReplyButtonText = computed(() => {
+  const s = conversationAutoReplyState.value
+  if (s.autoReplyManualDisabled === 1) return '手动关闭·点击开启'
+  if (s.autoReplyPaused === 1) return '人工暂停中·点击开启'
+  if (s.runningEnabled === true) return '运行中·点击关闭'
+  if (s.runningEnabled === false) return '已关闭·点击开启'
+  return '切换会话级自动回复'
+})
+
+const conversationAutoReplyButtonClass = computed(() => {
+  const s = conversationAutoReplyState.value
+  if (s.autoReplyManualDisabled === 1) return 'is-danger'
+  if (s.autoReplyPaused === 1) return 'is-warning'
+  if (s.runningEnabled === true) return 'is-success'
+  return 'is-default'
+})
+
+const conversationAutoReplyButtonTitle = computed(() => {
+  const s = conversationAutoReplyState.value
+  if (s.autoReplyManualDisabled === 1) return '已手动关闭，仅可手动开启（不会自动恢复）'
+  if (s.autoReplyPaused === 1) return '人工回复后自动暂停，1分钟后或买家发送"开启自动回复"将自动恢复'
+  if (s.runningEnabled === true) return '自动回复运行中，点击将手动关闭'
+  return '点击开启会话级自动回复'
+})
+
+const conversationAutoReplyHint = computed(() => {
+  const s = conversationAutoReplyState.value
+  if (s.autoReplyPaused === 1 && s.autoReplyManualDisabled === 0 && s.lastManualReplyAt) {
+    const elapsed = Date.now() - Number(s.lastManualReplyAt || 0)
+    const remain = Math.max(0, 60 - Math.floor(elapsed / 1000))
+    if (remain > 0) return `人工暂停中，${remain} 秒后买家发新消息将自动恢复`
+  }
+  return ''
+})
 const aiSwitchLoading = ref(false)
 const aiSettingsLoading = ref(false)
 const aiSettingsAvailable = ref(false)
@@ -1006,9 +1097,12 @@ function refreshAiScopeState() {
   const accountId = String(query.xianyuAccountId || '')
   if (accountId) {
     aiAutoReplyEnabled.value = aiGlobalEnabled.value && aiAccountScopes.value[accountId] === true
+    // 账号级有效后，加载会话级状态
+    loadConversationAutoReplyStatus()
     return
   }
   aiAutoReplyEnabled.value = false
+  conversationAutoReplyLoaded.value = false
 }
 
 async function toggleAiAutoReply(event) {
@@ -1048,6 +1142,86 @@ async function toggleAiAutoReply(event) {
     if (isCurrentRequest()) alert('切换失败: ' + (e.message || '网络错误'))
   } finally {
     if (isCurrentRequest()) aiSwitchLoading.value = false
+  }
+}
+
+// 加载会话级自动回复状态（在选中会话后调用）
+async function loadConversationAutoReplyStatus() {
+  const accountId = Number(query.xianyuAccountId || 0)
+  const sid = String(selected.value?.sid || selected.value?.sId || '')
+  const peerUserId = String(selected.value?.peerUserId || selected.value?.peerId || selected.value?.buyerId || '')
+  if (!accountId || (!sid && !peerUserId)) {
+    conversationAutoReplyLoaded.value = false
+    return
+  }
+  conversationAutoReplyLoading.value = true
+  try {
+    const res = await getConversationAutoReplyStatus({
+      accountId,
+      sid,
+      peerUserId,
+    })
+    const data = res?.data ?? res
+    if (data && typeof data === 'object') {
+      conversationAutoReplyState.value = {
+        autoReplyPaused: Number(data.autoReplyPaused ?? 0),
+        autoReplyManualDisabled: Number(data.autoReplyManualDisabled ?? 0),
+        lastManualReplyAt: Number(data.lastManualReplyAt || 0),
+        lastAutoReplyAt: Number(data.lastAutoReplyAt || 0),
+        effectiveEnabled: data.effectiveEnabled ?? null,
+        runningEnabled: data.runningEnabled ?? null,
+        pausedReason: data.pausedReason || '',
+      }
+      conversationAutoReplyLoaded.value = true
+    } else {
+      conversationAutoReplyLoaded.value = false
+    }
+  } catch (e) {
+    conversationAutoReplyLoaded.value = false
+  } finally {
+    conversationAutoReplyLoading.value = false
+  }
+}
+
+// 切换会话级自动回复（手动开启/关闭）
+async function toggleConversationAutoReply() {
+  if (conversationAutoReplyLoading.value || !selected.value?.id) return
+  const accountId = Number(query.xianyuAccountId || 0)
+  const sid = String(selected.value?.sid || selected.value?.sId || '')
+  const peerUserId = String(selected.value?.peerUserId || selected.value?.peerId || selected.value?.buyerId || '')
+  if (!accountId || (!sid && !peerUserId)) {
+    alert('会话信息缺失，无法切换会话级自动回复')
+    return
+  }
+  const s = conversationAutoReplyState.value
+  // 当前为运行中 → 手动关闭；否则 → 手动开启
+  const newEnabled = !(s.runningEnabled === true)
+  conversationAutoReplyLoading.value = true
+  try {
+    const res = await toggleConversationAutoReplyApi({
+      accountId,
+      sid,
+      peerUserId,
+      enabled: newEnabled,
+    })
+    const data = res?.data ?? res
+    if (data && typeof data === 'object') {
+      conversationAutoReplyState.value = {
+        ...conversationAutoReplyState.value,
+        autoReplyPaused: Number(data.autoReplyPaused ?? (newEnabled ? 0 : 1)),
+        autoReplyManualDisabled: Number(data.autoReplyManualDisabled ?? (newEnabled ? 0 : 1)),
+        effectiveEnabled: conversationAutoReplyState.value.effectiveEnabled,
+        runningEnabled: newEnabled ? (conversationAutoReplyState.value.effectiveEnabled ?? true) : false,
+        pausedReason: newEnabled ? '' : 'manual_disable',
+      }
+      if (!newEnabled && conversationAutoReplyState.value.lastManualReplyAt === 0) {
+        // 手动关闭不影响 lastManualReplyAt
+      }
+    }
+  } catch (e) {
+    alert('切换会话级自动回复失败: ' + (e.message || '网络错误'))
+  } finally {
+    conversationAutoReplyLoading.value = false
   }
 }
 
@@ -4795,4 +4969,63 @@ watch(() => selected.value?.xyGoodsId, () => {
 .xya-msg-order-detail-spec {
   color: #7384a8;
 }
-</style>
+
+/* 会话级自动回复状态机样式 */
+.xya-msg-conv-state {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed #e4e9f2;
+}
+.xya-msg-conv-state .xya-msg-status-row {
+  align-items: center;
+}
+.xya-msg-conv-toggle-btn {
+  padding: 6px 12px;
+  border: 1px solid #d6dbe5;
+  border-radius: 6px;
+  background: #fff;
+  color: #4a5568;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+.xya-msg-conv-toggle-btn:hover:not(:disabled) {
+  border-color: #4096ff;
+  color: #4096ff;
+}
+.xya-msg-conv-toggle-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.xya-msg-conv-toggle-btn.is-success {
+  border-color: #52c41a;
+  color: #389e0d;
+  background: #f6ffed;
+}
+.xya-msg-conv-toggle-btn.is-warning {
+  border-color: #faad14;
+  color: #d48806;
+  background: #fffbe6;
+}
+.xya-msg-conv-toggle-btn.is-danger {
+  border-color: #ff4d4f;
+  color: #cf1322;
+  background: #fff2f0;
+}
+.xya-msg-conv-hint {
+  margin-top: 6px;
+  padding: 6px 10px;
+  background: #fffbe6;
+  border: 1px solid #ffe58f;
+  border-radius: 4px;
+  color: #d48806;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.danger-text {
+  color: #cf1322;
+}
+.warning-text {
+  color: #d48806;
+}</style>

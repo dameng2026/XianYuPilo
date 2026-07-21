@@ -190,6 +190,230 @@ async def get_scope_status(
         return ResultObject.internal_error()
 
 
+# ============================================================
+# 会话级自动回复运行时状态（人工干预自动暂停/恢复）
+# ============================================================
+#
+# 业务规则：
+#   1. 人工发送消息后，会话级 auto_reply_paused=1（人工干预暂停）
+#   2. 买家发送"开启自动回复"指令 → 自动恢复（仅当未被用户手动关闭）
+#   3. 距上次人工回复 > 1 分钟，买家发新消息时自动恢复
+#   4. 用户在网站手动点击按钮关闭时，auto_reply_manual_disabled=1，
+#      禁止自动恢复，仅允许用户手动开启
+
+
+async def _resolve_conversation_by_sid(
+    db: AsyncSession,
+    account_id: int,
+    sid: str,
+    peer_user_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """通过 sId 反查消息表找到对端身份，再匹配 xianyu_conversation。
+    如果传入 peer_user_id，直接使用该值作为对端身份候选。
+    """
+    if not sid and not peer_user_id:
+        return None
+
+    sid_norm = (sid or "").strip()
+    if sid_norm.startswith("sid:"):
+        sid_norm = sid_norm[4:]
+    sid_goofish = f"{sid_norm}@goofish" if sid_norm and not sid_norm.endswith("@goofish") else sid_norm
+
+    peer_id_candidates: list[str] = []
+    if peer_user_id:
+        v = str(peer_user_id).strip()
+        if v:
+            peer_id_candidates.append(v)
+            if v.endswith("@goofish") and v[:-8] not in peer_id_candidates:
+                peer_id_candidates.append(v[:-8])
+            elif not v.endswith("@goofish") and f"{v}@goofish" not in peer_id_candidates:
+                peer_id_candidates.append(f"{v}@goofish")
+
+    if sid_norm:
+        sid_peer_row = (await db.execute(text("""
+            SELECT peer_external_uid, sender_user_id, receiver_user_id
+            FROM xianyu_chat_message
+            WHERE account_id = :account_id
+              AND deleted = 0
+              AND s_id COLLATE utf8mb4_unicode_ci IN (:sid, :sid_goofish)
+            ORDER BY id DESC LIMIT 1
+        """), {
+            "account_id": account_id,
+            "sid": sid_norm,
+            "sid_goofish": sid_goofish,
+        })).mappings().first()
+        if sid_peer_row:
+            for key in ("peer_external_uid", "sender_user_id", "receiver_user_id"):
+                v = str(sid_peer_row.get(key) or "").strip()
+                if v and v not in peer_id_candidates:
+                    peer_id_candidates.append(v)
+
+    if not peer_id_candidates:
+        return None
+
+    placeholders = ", ".join([f":p{i}" for i in range(len(peer_id_candidates))])
+    params = {"account_id": account_id}
+    for i, v in enumerate(peer_id_candidates):
+        params[f"p{i}"] = v
+
+    conv_row = (await db.execute(text(f"""
+        SELECT id, account_id, external_buyer_id, peer_external_uid, peer_key,
+               auto_reply_paused, auto_reply_manual_disabled,
+               last_manual_reply_at, last_auto_reply_at
+        FROM xianyu_conversation
+        WHERE account_id = :account_id
+          AND (
+              external_buyer_id IN ({placeholders})
+              OR peer_external_uid IN ({placeholders})
+              OR peer_key IN ({placeholders})
+          )
+        ORDER BY id DESC LIMIT 1
+    """), params)).mappings().first()
+    return dict(conv_row) if conv_row else None
+
+
+@router.post("/conversation-toggle")
+async def toggle_conversation_auto_reply(
+    request: Request,
+    req: Dict[str, Any] | None = None,
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(verify_internal_token),
+):
+    """会话级自动回复手动开关。
+    用户在网站点击按钮开启/关闭时调用，与人工干预触发的自动暂停区分：
+    - enabled=true：手动开启（清除暂停 + 清除手动关闭标记）
+    - enabled=false：手动关闭（设置暂停 + 设置手动关闭标记，禁止自动恢复）
+    """
+    try:
+        payload = req or {}
+        account_id = payload.get("accountId")
+        sid = payload.get("sid") or payload.get("sId") or payload.get("sessionId")
+        peer_user_id = payload.get("peerUserId") or payload.get("peerId")
+        enabled = payload.get("enabled")
+        if account_id is None or enabled is None or (not sid and not peer_user_id):
+            return ResultObject.failed("缺少 accountId、enabled 或 sid/peerUserId 参数")
+
+        conv = await _resolve_conversation_by_sid(
+            db, int(account_id), str(sid or ""), peer_user_id
+        )
+        if not conv:
+            return ResultObject.failed("未找到对应会话", code=404)
+
+        conversation_id = int(conv["id"])
+        if bool(enabled):
+            # 手动开启：清除暂停 + 清除手动关闭标记 + 重置人工回复时间戳
+            await db.execute(text("""
+                UPDATE xianyu_conversation
+                SET auto_reply_paused = 0,
+                    auto_reply_manual_disabled = 0,
+                    last_manual_reply_at = NULL,
+                    updated_time = NOW()
+                WHERE id = :conversation_id
+            """), {"conversation_id": conversation_id})
+            logger.info(
+                "conversation auto reply manual resume accountId=%s convId=%d",
+                account_id, conversation_id
+            )
+        else:
+            # 手动关闭：设置暂停 + 设置手动关闭标记（禁止自动恢复）
+            await db.execute(text("""
+                UPDATE xianyu_conversation
+                SET auto_reply_paused = 1,
+                    auto_reply_manual_disabled = 1,
+                    updated_time = NOW()
+                WHERE id = :conversation_id
+            """), {"conversation_id": conversation_id})
+            logger.info(
+                "conversation auto reply manual pause accountId=%s convId=%d",
+                account_id, conversation_id
+            )
+
+        await db.commit()
+        return ResultObject.success({
+            "ok": True,
+            "conversationId": conversation_id,
+            "accountId": int(account_id),
+            "enabled": bool(enabled),
+            "autoReplyPaused": 0 if bool(enabled) else 1,
+            "autoReplyManualDisabled": 0 if bool(enabled) else 1,
+        })
+    except Exception as exc:
+        logger.exception("切换会话自动回复状态失败")
+        return ResultObject.internal_error()
+
+
+@router.get("/conversation-status")
+async def get_conversation_auto_reply_status(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(verify_internal_token),
+):
+    """查询会话级自动回复状态。
+    返回字段：
+      - autoReplyPaused：会话级是否暂停（0否 1是）
+      - autoReplyManualDisabled：是否被用户手动关闭（0否 1是）
+      - lastManualReplyAt：最后人工回复时间戳（毫秒）
+      - lastAutoReplyAt：最后 AI 自动回复时间戳（毫秒）
+      - effectiveEnabled：综合账号级/全局开关后的"配置层"是否启用
+      - runningEnabled：实际是否在自动回复（配置层启用 且 会话级未暂停）
+    """
+    try:
+        account_id = request.query_params.get("accountId")
+        sid = request.query_params.get("sid") or request.query_params.get("sId") or request.query_params.get("sessionId")
+        peer_user_id = request.query_params.get("peerUserId") or request.query_params.get("peerId")
+        if not account_id or (not sid and not peer_user_id):
+            return ResultObject.failed("缺少 accountId 或 sid/peerUserId 参数")
+
+        conv = await _resolve_conversation_by_sid(
+            db, int(account_id), str(sid or ""), peer_user_id
+        )
+        if not conv:
+            # 会话尚未建立时，按"未暂停"返回，让前端按账号级/全局开关展示
+            account_scopes = await _load_account_scopes(db)
+            global_enabled = await _load_global_enabled(db)
+            accounts = account_scopes.get("accounts", {}) if account_scopes else {}
+            account_enabled = bool(accounts.get(str(account_id))) if str(account_id) in accounts else True
+            effective = bool(global_enabled) and account_enabled
+            return ResultObject.success({
+                "conversationId": None,
+                "autoReplyPaused": 0,
+                "autoReplyManualDisabled": 0,
+                "lastManualReplyAt": None,
+                "lastAutoReplyAt": None,
+                "effectiveEnabled": effective,
+                "runningEnabled": effective,
+            })
+
+        conversation_id = int(conv["id"])
+        auto_reply_paused = int(conv.get("auto_reply_paused") or 0)
+        auto_reply_manual_disabled = int(conv.get("auto_reply_manual_disabled") or 0)
+        last_manual_at = conv.get("last_manual_reply_at")
+        last_auto_at = conv.get("last_auto_reply_at")
+
+        # 综合账号级/全局开关
+        account_scopes = await _load_account_scopes(db)
+        global_enabled = await _load_global_enabled(db)
+        accounts = account_scopes.get("accounts", {}) if account_scopes else {}
+        account_enabled = bool(accounts.get(str(account_id))) if str(account_id) in accounts else True
+        effective = bool(global_enabled) and account_enabled
+        running = effective and auto_reply_paused == 0
+
+        return ResultObject.success({
+            "conversationId": conversation_id,
+            "autoReplyPaused": auto_reply_paused,
+            "autoReplyManualDisabled": auto_reply_manual_disabled,
+            "lastManualReplyAt": int(last_manual_at) if last_manual_at is not None else None,
+            "lastAutoReplyAt": int(last_auto_at) if last_auto_at is not None else None,
+            "effectiveEnabled": effective,
+            "runningEnabled": running,
+            "pausedReason": "manual_disable" if auto_reply_manual_disabled == 1
+                            else ("manual_intervention" if auto_reply_paused == 1 else None),
+        })
+    except Exception as exc:
+        logger.exception("查询会话自动回复状态失败")
+        return ResultObject.internal_error()
+
+
 # ===== 内部辅助方法 =====
 
 async def _load_account_scopes(db: AsyncSession) -> Dict[str, Any]:

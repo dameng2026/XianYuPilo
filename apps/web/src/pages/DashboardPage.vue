@@ -2,7 +2,6 @@
   <div class="dashboard-page">
     <div class="dashboard-grid">
       <div class="dashboard-main">
-        <OnboardingChecklist @navigate="onOnboardingNavigate" />
         <section v-if="totalSlides > 0" class="hero-card">
           <div class="hero-viewport">
             <div class="hero-track" :style="{ transform: `translateX(-${currentSlide * 100}%)` }">
@@ -45,6 +44,8 @@
             ></button>
           </div>
         </section>
+
+        <OnboardingChecklist @navigate="onOnboardingNavigate" />
 
         <div v-if="error" class="global-notice error">
           <span>{{ error }}</span>

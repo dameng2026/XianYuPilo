@@ -214,8 +214,6 @@ include_router_excluding(
 # RAG 知识库
 api_router.include_router(rag.router)
 
-# 商品擦亮与批量刷新
-api_router.include_router(items.polish_router)
 
 # WebSocket 控制
 include_router_excluding(

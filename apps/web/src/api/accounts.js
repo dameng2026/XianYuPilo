@@ -5,6 +5,12 @@ export function getAccounts(params = {}, config = {}) {
   return request({ ...config, url: '/xianyu/accounts', method: 'get', params: pageParams(params) })
 }
 
+// 轻量账号列表：开源版账号列表接口本身即返回轻量字段，
+// 此处复用 /xianyu/accounts 以保持与商业版前端调用约定一致，避免新增后端路由。
+export function getLiteAccounts(params = {}, config = {}) {
+  return request({ ...config, url: '/xianyu/accounts', method: 'get', params: pageParams(params) })
+}
+
 export function createAccount(data) {
   return request({ url: '/xianyu/accounts', method: 'post', data })
 }

@@ -1,18 +1,26 @@
 <template>
   <div class="po-page">
-    <div class="global-notice capability-notice" role="status">
-      当前版本尚未接入可持久恢复、带租约且能核验闲鱼平台结果的库存归零自动下架执行器。为避免把“已保存”误认为“会执行”，该能力保持禁用。
+    <div v-if="loading" class="global-notice" role="status" aria-live="polite">配置加载中...</div>
+    <div v-else-if="loadError" class="global-notice error" role="alert">
+      <strong>商品运营配置暂时无法加载</strong>
+      <p>{{ loadError }}</p>
+      <button type="button" class="po-retry-btn" @click="load">重新加载</button>
     </div>
-    <div class="po-grid">
+    <div v-else class="po-grid">
       <div class="po-main">
-        <CardPanel title="自动上下架策略" desc="能力状态与上线前置条件">
+        <CardPanel title="自动上下架策略" desc="根据库存与销售情况自动管理商品状态">
           <div class="po-form">
             <div class="po-row po-row-toggle">
               <div>
-                <strong>库存归零自动下架（当前不可用）</strong>
-                <p>需先完成幂等任务、平台结果核验、未知结果人工复核与审计追踪后才能启用。</p>
+                <strong>库存归零自动下架</strong>
+                <p>商品库存为 0 时自动下架，避免买家拍下后无货可发</p>
               </div>
-              <button type="button" class="po-switch" disabled aria-label="库存归零自动下架当前不可用">
+              <button
+                type="button"
+                :class="['po-switch', { on: form.autoShelfOffOnZeroStock }]"
+                :aria-pressed="String(form.autoShelfOffOnZeroStock)"
+                @click="form.autoShelfOffOnZeroStock = !form.autoShelfOffOnZeroStock"
+              >
                 <span class="po-switch-knob" />
               </button>
             </div>
@@ -20,7 +28,14 @@
         </CardPanel>
 
         <div class="po-actions">
-          <button type="button" class="po-save-btn" disabled title="当前没有可生效的商品运营自动化配置">暂无可保存配置</button>
+          <button
+            type="button"
+            class="po-save-btn"
+            :disabled="saving || !settingsAvailable"
+            @click="save"
+          >
+            {{ saving ? '保存中...' : '保存配置' }}
+          </button>
         </div>
       </div>
     </div>
@@ -28,7 +43,63 @@
 </template>
 
 <script setup>
+import { onMounted, reactive, ref } from 'vue'
 import CardPanel from '../../components/CardPanel.vue'
+import { getBusinessSettings, saveBusinessSettings } from '../../api/businessSettings.js'
+
+const loading = ref(true)
+const loadError = ref('')
+const settingsAvailable = ref(false)
+const saving = ref(false)
+
+const form = reactive({
+  autoShelfOffOnZeroStock: true
+})
+
+async function load() {
+  loading.value = true
+  loadError.value = ''
+  settingsAvailable.value = false
+  form.autoShelfOffOnZeroStock = true
+  try {
+    const res = await getBusinessSettings('product-op-settings')
+    const data = res?.data
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      throw new Error('商品运营配置响应格式异常')
+    }
+    if (data.autoShelfOffOnZeroStock !== undefined && typeof data.autoShelfOffOnZeroStock !== 'boolean') {
+      throw new Error('自动上下架状态响应格式异常')
+    }
+    Object.keys(form).forEach(key => {
+      if (data[key] !== undefined) form[key] = data[key]
+    })
+    settingsAvailable.value = true
+  } catch (err) {
+    console.error('[PO] 加载失败:', err)
+    loadError.value = `${err.message || '网络异常'}；配置成功加载前不会应用或覆盖任何设置。`
+  } finally {
+    loading.value = false
+  }
+}
+
+async function save() {
+  if (!settingsAvailable.value) return
+  saving.value = true
+  try {
+    await saveBusinessSettings('product-op-settings', { ...form })
+    showToast('商品运营配置已保存')
+  } catch (err) {
+    showToast('保存失败：' + (err.message || '网络错误'), true)
+  } finally {
+    saving.value = false
+  }
+}
+
+function showToast(message, isError = false) {
+  window.dispatchEvent(new CustomEvent('xya-toast', { detail: { message, isError } }))
+}
+
+onMounted(load)
 </script>
 
 <style scoped>
@@ -68,11 +139,16 @@ import CardPanel from '../../components/CardPanel.vue'
 }
 .po-switch.on .po-switch-knob { left: 22px; }
 
-@media (max-width: 900px) {
-  .po-loading {
-    padding: 20px;
-  }
+.po-retry-btn {
+  border: 0;
+  border-radius: 10px;
+  padding: 8px 14px;
+  background: #2563eb;
+  color: #fff;
+  cursor: pointer;
+}
 
+@media (max-width: 900px) {
   .po-form {
     gap: 12px;
   }

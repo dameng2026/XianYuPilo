@@ -24,14 +24,14 @@
           <option value="5">已关闭</option>
         </select>
         <div class="filter-search">
-          <input v-model="query.keyword" class="search-input" placeholder="搜索订单号 / 买家 / 商品" @keyup.enter="search" />
+          <input v-model="query.keyword" class="search-input" placeholder="搜索订单号 / 买家 / 商品名称 / 商品ID" @keyup.enter="search" />
           <span class="search-icon">🔍</span>
         </div>
         <AppButton type="primary" class="btn-query" :loading="ordersLoading" @click="search">查询</AppButton>
         <AppButton class="btn-reset" @click="resetFilters">重置</AppButton>
-        <AppButton :loading="syncingList" :disabled="!query.accountId" class="btn-sync" @click="syncAccountOrders">
+        <AppButton :loading="syncingList" :disabled="!accountsAvailable || !accounts.length" class="btn-sync" @click="onSyncButtonClick">
           <span class="sync-icon">↻</span>
-          {{ syncingList ? '同步中...' : '同步当前账号真实订单' }}
+          {{ syncingList ? '同步中...' : syncButtonText }}
         </AppButton>
       </div>
       <div class="filter-tip">
@@ -80,14 +80,13 @@
           <div class="stat-trend down">较昨日 <b>-3.2%</b> <span class="trend-arrow">↓</span></div>
         </div>
       </div>
-      <div class="stat-card">
+      <div v-if="todayAmountAvailable" class="stat-card">
         <div class="stat-icon-circle purple">
           <span class="stat-icon-svg">¥</span>
         </div>
         <div class="stat-info">
           <div class="stat-label">今日订单金额</div>
-          <div class="stat-value amount">¥{{ formatMoney(stats.todayAmount) }}</div>
-          <div class="stat-trend up">较昨日 <b>+15.6%</b> <span class="trend-arrow">↑</span></div>
+          <div class="stat-value amount">¥{{ formatMoney(todayAmount) }}</div>
         </div>
       </div>
     </div>
@@ -198,7 +197,19 @@
       </div>
 
       <div v-if="ordersAvailable === true" class="pagination-wrap">
-        <Pagination :total="total" :current="query.current" :page-size="query.size" @page-change="goPage" />
+        <Pagination
+          :total="total"
+          :current="query.current"
+          :page-size="query.size"
+          :sizes="[20, 50, 100]"
+          @page-change="goPage"
+          @size-change="onPageSizeChange"
+        />
+        <div class="page-jump-wrap">
+          <span class="page-jump-label">前往</span>
+          <input type="number" v-model.number="jumpPage" class="page-jump-input" min="1" @keyup.enter="jumpToPage" />
+          <span class="page-jump-label">页</span>
+        </div>
       </div>
     </div>
 
@@ -326,7 +337,7 @@ import EmptyState from '../components/EmptyState.vue'
 import Pagination from '../components/Pagination.vue'
 import Icon from '../components/Icon.vue'
 import { getAccounts } from '../api/accounts.js'
-import { getOrderDetail, getOrders, manualDeliverOrder, syncOrder, syncOrders } from '../api/orders.js'
+import { getOrderDetail, getOrders, getTodayOrderAmount, manualDeliverOrder, syncOrder, syncOrders } from '../api/orders.js'
 import { recordsOf, totalOf } from '../utils/apiData.js'
 import { confirmAction } from '../utils/confirmAction.js'
 import { accountName } from '../utils/format.js'
@@ -361,6 +372,9 @@ const accountsAvailable = ref(null)
 const ordersRequestGuard = createLatestRequestGuard()
 const batchMenuVisible = ref(false)
 const selectedKeys = ref([])
+const todayAmount = ref(null)
+const todayAmountAvailable = ref(false)
+const jumpPage = ref(1)
 
 const query = reactive({
   accountId: '',
@@ -403,6 +417,8 @@ const manualSubmitLabel = computed(() => {
   return '确认并立即发货'
 })
 
+const syncButtonText = computed(() => query.accountId ? '同步当前账号真实订单' : '同步全部账号的真实订单')
+
 const stats = computed(() => {
   const pending = orders.value.filter(o => Number(o.orderStatus) === 2).length
   const completed = orders.value.filter(o => Number(o.orderStatus) === 4 || Number(o.orderStatus) === 3).length
@@ -415,8 +431,7 @@ const stats = computed(() => {
   return {
     pendingDelivery: Math.max(pendingDelivery, pending),
     completed,
-    abnormal: Math.max(abnormal, closed),
-    todayAmount: '128,560.00'
+    abnormal: Math.max(abnormal, closed)
   }
 })
 
@@ -475,7 +490,9 @@ function formatNumber(n) {
 }
 
 function formatMoney(n) {
-  return n
+  const num = Number(n)
+  if (!Number.isFinite(num)) return '0.00'
+  return num.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
 // 记录加载失败的图片 URL，避免污染原数据（切换页码再回来时可重新尝试）
@@ -497,11 +514,26 @@ async function loadOrders(options = {}) {
   if (!silent) ordersLoading.value = true
   const requestConfig = listRefreshRequestConfig(hadSnapshot)
   try {
-    const [accountResult, orderResult] = await Promise.allSettled([
+    const accountIdParam = query.accountId ? Number(query.accountId) : undefined
+    const [accountResult, orderResult, amountResult] = await Promise.allSettled([
       getAccounts({ page: 1, pageSize: 200 }, requestConfig),
-      getOrders(buildOrdersQuery({ ...query, sync }), requestConfig)
+      getOrders(buildOrdersQuery({ ...query, sync }), requestConfig),
+      getTodayOrderAmount(accountIdParam)
     ])
     if (!request.isCurrent()) return
+    if (amountResult.status === 'fulfilled') {
+      const amount = amountResult.value?.data?.todayAmount
+      if (amount !== null && amount !== undefined && String(amount).trim() !== '') {
+        todayAmount.value = amount
+        todayAmountAvailable.value = true
+      } else {
+        todayAmount.value = null
+        todayAmountAvailable.value = false
+      }
+    } else {
+      todayAmount.value = null
+      todayAmountAvailable.value = false
+    }
     if (accountResult.status === 'fulfilled') {
       accounts.value = recordsOf(accountResult.value.data)
       accountsAvailable.value = true
@@ -737,6 +769,57 @@ async function syncAccountOrders() {
   }
 }
 
+async function syncAllAccountsOrders() {
+  const list = accounts.value
+  if (!Array.isArray(list) || list.length === 0) {
+    error.value = '没有可同步的账号'
+    return
+  }
+  clearNotice()
+  syncingList.value = true
+  try {
+    const results = await Promise.allSettled(
+      list.map(account => syncOrders({
+        accountId: Number(account.id),
+        syncDeliveryStatus: true
+      }))
+    )
+    let succeeded = 0
+    let failed = 0
+    results.forEach(r => {
+      if (r.status === 'fulfilled') {
+        const data = r.value?.data
+        if (data && typeof data === 'object' && !Array.isArray(data) && data.ok !== false) {
+          succeeded += 1
+        } else {
+          failed += 1
+        }
+      } else {
+        failed += 1
+      }
+    })
+    if (failed === 0) {
+      success.value = `全部账号同步完成（共 ${succeeded} 个账号）`
+    } else if (succeeded === 0) {
+      error.value = `全部账号同步失败（共 ${failed} 个账号）`
+    } else {
+      success.value = `同步完成：成功 ${succeeded} 个，失败 ${failed} 个`
+    }
+    await loadOrders({ sync: false })
+  } catch (requestError) {
+    error.value = requestError.message || '同步全部账号订单失败'
+  } finally {
+    syncingList.value = false
+  }
+}
+
+function onSyncButtonClick() {
+  if (query.accountId) {
+    return syncAccountOrders()
+  }
+  return syncAllAccountsOrders()
+}
+
 function search() {
   query.current = 1
   loadOrders()
@@ -754,8 +837,29 @@ function resetFilters() {
 }
 
 function goPage(page) {
-  query.current = page
+  const totalPages = Math.max(1, Math.ceil(total.value / query.size))
+  const p = Math.max(1, Math.min(totalPages, Number(page) || 1))
+  if (p === query.current) return
+  query.current = p
+  jumpPage.value = p
   loadOrders()
+}
+
+function onPageSizeChange(size) {
+  query.size = Number(size) || 20
+  query.current = 1
+  jumpPage.value = 1
+  loadOrders()
+}
+
+function jumpToPage() {
+  const totalPages = Math.max(1, Math.ceil(total.value / query.size))
+  const p = Math.max(1, Math.min(totalPages, Number(jumpPage.value) || 1))
+  jumpPage.value = p
+  if (p !== query.current) {
+    query.current = p
+    loadOrders()
+  }
 }
 
 function toggleBatchMenu() {
@@ -1377,8 +1481,36 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: flex-end;
+  gap: 12px;
   padding: 14px 22px;
   border-top: 1px solid #f1f5f9;
+}
+
+.page-jump-wrap {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.page-jump-label {
+  font-size: 13px;
+  color: #64748b;
+}
+
+.page-jump-input {
+  width: 48px;
+  height: 32px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  text-align: center;
+  font-size: 13px;
+  color: #334155;
+  outline: none;
+  padding: 0 4px;
+}
+.page-jump-input:focus {
+  border-color: #93c5fd;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, .1);
 }
 
 :deep(.pagination-wrap .pagination) {
@@ -1629,8 +1761,10 @@ onBeforeUnmount(() => {
 @media (max-width: 1200px) {
   .stats-grid { grid-template-columns: repeat(3, 1fr); }
 }
-@media (max-width: 900px) {
+@media (max-width: 768px) {
   .stats-grid { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 900px) {
   .filter-row { flex-direction: column; align-items: stretch; }
   .filter-search { max-width: none; }
   .form-grid { grid-template-columns: 1fr; }

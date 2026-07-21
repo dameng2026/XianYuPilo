@@ -32,3 +32,7 @@ export function deleteGoods(id) {
 export function deleteGoodsLocal(id) {
   return request({ url: `/goods/${id}/local`, method: 'delete' })
 }
+
+export function deleteGoodsRemote(id, data = {}) {
+  return request({ url: `/goods/${id}/remote`, method: 'delete', data })
+}

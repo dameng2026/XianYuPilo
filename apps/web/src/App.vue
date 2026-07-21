@@ -142,6 +142,7 @@ const pageMap = {
   'auto-delivery': asyncPage(() => import('./pages/AutoDeliveryPage.vue')),
   'delivery-source-library': asyncPage(() => import('./pages/DeliverySourceLibraryPage.vue')),
   'delivery-statement': asyncPage(() => import('./pages/DeliveryStatementPage.vue')),
+  'card-warehouse': asyncPage(() => import('./pages/CardWarehousePage.vue')),
   'delivery-records': asyncPage(() => import('./pages/DeliveryRecordsPage.vue')),
   'scheduled-tasks': asyncPage(() => import('./pages/ScheduledTasksPage.vue')),
   'auto-reply': asyncPage(() => import('./pages/AutoReplyPage.vue')),

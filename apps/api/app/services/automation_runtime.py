@@ -185,6 +185,18 @@ async def process_incoming_message(db: AsyncSession, payload: dict[str, Any]) ->
         )
         return
 
+    # Step 1.5: 会话级自动回复状态机检查（人工干预自动暂停/恢复）
+    # 此检查在 AI 规则匹配之前生效，会话暂停时直接跳过 AI 回复
+    conv_state_allow, conv_state_reason = await _check_conversation_auto_reply_state(
+        db, account_id, s_id, content,
+    )
+    if not conv_state_allow:
+        logger.info(
+            "AI 自动回复跳过：会话级状态机 accountId=%d reason=%s",
+            account_id, conv_state_reason,
+        )
+        return
+
     # Step 2: 加载 AI 客服配置（含 systemPrompt / 知识库 / 聊天规则 / 人设）
     ai_config = await load_business_setting(db, AI_CS_SETTING_KEY)
     if not ai_config.get("enabled"):
@@ -487,6 +499,146 @@ async def recover_ai_auto_reply_attempts(
                 type(exc).__name__,
             )
     return counts
+
+
+async def _check_conversation_auto_reply_state(
+    db: AsyncSession,
+    account_id: int,
+    s_id: str,
+    content: str,
+) -> tuple[bool, str]:
+    """会话级自动回复状态机检查（人工干预自动暂停/恢复）。
+
+    业务规则：
+      1. 买家发送"开启自动回复"指令 → 自动恢复（仅当未被用户手动关闭）
+      2. 用户手动关闭（auto_reply_manual_disabled=1）→ 跳过 AI 回复
+      3. 距上次人工回复 > 1 分钟，买家发新消息时自动恢复
+      4. 距上次人工回复 < 1 分钟 → 保持暂停，跳过 AI 回复
+      5. 此检查在 AI 规则匹配之前生效，会话暂停时直接跳过 AI 回复
+
+    Returns:
+        (allow_continue, reason)
+        - (True, "allowed")：继续走 AI 回复流程
+        - (True, "resumed")：刚自动恢复，继续走 AI 回复流程
+        - (False, "manual_disabled"|"pause_window"|"resume_command_consumed")：跳过 AI 回复
+    """
+    if not account_id or not s_id:
+        return (True, "allowed")
+
+    normalized_sid = (
+        str(s_id or "")
+        .strip()
+        .removeprefix("sid:")
+        .removesuffix("@goofish")
+    )
+    if not normalized_sid:
+        return (True, "allowed")
+
+    try:
+        conv_state_row = (await db.execute(
+            text(
+                """
+                SELECT id, auto_reply_paused, auto_reply_manual_disabled, last_manual_reply_at
+                FROM xianyu_conversation
+                WHERE account_id = :account_id
+                  AND (
+                    REPLACE(REPLACE(COALESCE(peer_key, ''), 'sid:', ''), '@goofish', '') = :s_id
+                    OR REPLACE(REPLACE(COALESCE(external_buyer_id, ''), 'sid:', ''), '@goofish', '') = :s_id
+                  )
+                ORDER BY last_message_time DESC, id DESC
+                LIMIT 1
+                """
+            ),
+            {"account_id": account_id, "s_id": normalized_sid},
+        )).mappings().first()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "会话级状态查询失败，按允许处理 accountId=%d errorType=%s",
+            account_id,
+            type(exc).__name__,
+        )
+        return (True, "allowed")
+
+    if not conv_state_row:
+        # 未找到会话记录，按允许处理（首次消息或会话未同步）
+        return (True, "allowed")
+
+    conversation_db_id = int(conv_state_row["id"])
+    conv_paused = int(conv_state_row.get("auto_reply_paused") or 0)
+    conv_manual_disabled = int(conv_state_row.get("auto_reply_manual_disabled") or 0)
+    conv_last_manual_at = conv_state_row.get("last_manual_reply_at")
+
+    # 规则 1：买家发送"开启自动回复"指令
+    RESUME_COMMAND = "开启自动回复"
+    if content.strip() == RESUME_COMMAND:
+        if conv_paused == 1 and conv_manual_disabled == 0:
+            await db.execute(text("""
+                UPDATE xianyu_conversation
+                SET auto_reply_paused = 0, last_manual_reply_at = NULL, updated_time = NOW()
+                WHERE id = :conversation_id
+            """), {"conversation_id": conversation_db_id})
+            logger.info(
+                "[AUTO_REPLY] 买家发送'开启自动回复'指令，自动恢复 AI 回复 accountId=%d convId=%d",
+                account_id, conversation_db_id,
+            )
+        elif conv_paused == 1 and conv_manual_disabled == 1:
+            logger.info(
+                "[AUTO_REPLY] 买家发送'开启自动回复'指令，但用户已手动关闭，保持暂停 accountId=%d convId=%d",
+                account_id, conversation_db_id,
+            )
+        # 此条指令消息本身不触发 AI 回复（避免回复"开启自动回复"这条指令）
+        return (False, "resume_command_consumed")
+
+    if conv_paused != 1:
+        return (True, "allowed")
+
+    # 规则 2：用户手动关闭，跳过 AI 回复
+    if conv_manual_disabled == 1:
+        logger.info(
+            "[AUTO_REPLY] 用户已手动关闭自动回复，跳过 AI 回复 accountId=%d convId=%d",
+            account_id, conversation_db_id,
+        )
+        return (False, "manual_disabled")
+
+    # 规则 3/4：人工干预暂停中，检查是否超过 1 分钟自动恢复
+    now_ms = int(time.time() * 1000)
+    if conv_last_manual_at is None:
+        # 异常状态：暂停但无 last_manual_reply_at，直接恢复
+        await db.execute(text("""
+            UPDATE xianyu_conversation
+            SET auto_reply_paused = 0, last_manual_reply_at = NULL, updated_time = NOW()
+            WHERE id = :conversation_id
+        """), {"conversation_id": conversation_db_id})
+        logger.warning(
+            "[AUTO_REPLY] 暂停状态异常（无 last_manual_reply_at），自动恢复 accountId=%d convId=%d",
+            account_id, conversation_db_id,
+        )
+        return (True, "resumed")
+
+    try:
+        elapsed_ms = now_ms - int(conv_last_manual_at)
+    except (TypeError, ValueError):
+        elapsed_ms = 60_001  # 异常时按已超时处理
+
+    if elapsed_ms >= 60_000:
+        # 自动恢复（1 分钟超时）
+        await db.execute(text("""
+            UPDATE xianyu_conversation
+            SET auto_reply_paused = 0, last_manual_reply_at = NULL, updated_time = NOW()
+            WHERE id = :conversation_id
+        """), {"conversation_id": conversation_db_id})
+        logger.info(
+            "[AUTO_REPLY] 距上次人工回复 %dms >= 60s，自动恢复 AI 回复 accountId=%d convId=%d",
+            elapsed_ms, account_id, conversation_db_id,
+        )
+        return (True, "resumed")
+
+    # 1 分钟内，保持暂停
+    logger.info(
+        "[AUTO_REPLY] 人工干预暂停中（%dms < 60s），跳过 AI 回复 accountId=%d convId=%d",
+        elapsed_ms, account_id, conversation_db_id,
+    )
+    return (False, "pause_window")
 
 
 async def _check_auto_reply_scope(
@@ -957,13 +1109,46 @@ async def _save_reply_message(
         "xyGoodsId": goods_id,
     }
 
-    return await save_chat_message(
+    local_message_id = await save_chat_message(
         db,
         account_id,
         reply_msg,
         seller_external_uid=seller_external_uid,
         sync_legacy_message=False,
     )
+
+    # 更新会话的 last_auto_reply_at 时间戳（用于人工干预检测与前端展示）
+    # 仅在成功落库后执行；失败时由调用方回滚事务，本次更新也会一并回滚
+    try:
+        normalized_sid = (
+            str(s_id or "")
+            .strip()
+            .removeprefix("sid:")
+            .removesuffix("@goofish")
+        )
+        if normalized_sid:
+            await db.execute(text("""
+                UPDATE xianyu_conversation
+                SET last_auto_reply_at = :last_auto_reply_at,
+                    updated_time = NOW()
+                WHERE account_id = :account_id
+                  AND (
+                    REPLACE(REPLACE(COALESCE(peer_key, ''), 'sid:', ''), '@goofish', '') = :s_id
+                    OR REPLACE(REPLACE(COALESCE(external_buyer_id, ''), 'sid:', ''), '@goofish', '') = :s_id
+                  )
+            """), {
+                "account_id": account_id,
+                "s_id": normalized_sid,
+                "last_auto_reply_at": now_ms,
+            })
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "更新 last_auto_reply_at 失败 accountId=%d errorType=%s",
+            account_id,
+            type(exc).__name__,
+        )
+
+    return local_message_id
 
 
 async def insert_notification(

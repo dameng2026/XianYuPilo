@@ -400,7 +400,6 @@ async def get_runtime_status(
         "commercialBridgeSiteCode": commercial_runtime.get("commercialBridgeSiteCode") or "",
         "commercialBridgeMessage": commercial_runtime.get("commercialBridgeMessage") or "",
         "commercialFrontendUrl": commercial_runtime.get("commercialFrontendUrl") or "",
-        "commercialAdminUrl": commercial_runtime.get("commercialAdminUrl") or "",
         "generalModelConfigured": is_ai_configured(general_model),
         "embeddingModelConfigured": is_ai_configured(embedding_model),
     })

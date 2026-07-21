@@ -387,6 +387,8 @@ async def _match_delivery_rule(
         return None
     rule = dict(rows[0])
     rule["delivery_mode"] = _normalize_delivery_mode(rule.get("delivery_mode"))
+    # 旧版 delivery_rule 表无 auto_confirm_shipment 字段，无法自动确认发货；
+    # 自动确认发货仅在 delivery_goods_config（新版配置）路径下生效。
     rule["auto_confirm_shipment"] = 0
     return rule
 

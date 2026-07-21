@@ -40,3 +40,6 @@ apps/web/mobile-*.png
 docs/handoffs/
 docs/specs/
 HANDOFF_EXECUTION_DOC.md
+
+# Backup sync files
+.backup-sync/

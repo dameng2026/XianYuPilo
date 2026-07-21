@@ -4,6 +4,9 @@ import asyncio
 import copy
 import hashlib
 import logging
+import re
+import time
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -30,6 +33,19 @@ def _as_text(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+# Open-source edition must never leak the commercial backend origin to the
+# browser.  httpx error messages embed the full request URL, so we strip any
+# http(s) URL from runtime messages before returning them to the API layer.
+_URL_REDACT_PATTERN = re.compile(r"https?://[^\s'\"\)>]+", re.IGNORECASE)
+
+
+def _redact_urls(value: Any) -> str:
+    text = _as_text(value)
+    if not text:
+        return ""
+    return _URL_REDACT_PATTERN.sub("[已隐藏]", text)
 
 
 _NON_AD_PAYMENT_MARKERS = (
@@ -398,7 +414,7 @@ async def get_commercial_bridge_runtime() -> dict[str, Any]:
     config = get_commercial_bridge_config()
     health_status = await _probe_health(config)
     health_ok = bool(health_status.get("bridgeHealthOk"))
-    health_message = str(health_status.get("message") or "").strip()
+    health_message = _redact_urls(health_status.get("message"))
     configured = commercial_bridge_is_configured(config)
 
     runtime = {
@@ -413,17 +429,19 @@ async def get_commercial_bridge_runtime() -> dict[str, Any]:
         "commercialMutationIdempotencyEnabled": config["mutationIdempotencyEnabled"],
         "commercialPaymentIdempotencyEnabled": config["paymentIdempotencyEnabled"],
         "commercialPaidAdPlacementEnforced": config["paidAdPlacementEnforced"],
+        # 前台地址用于在开源版页面给商业版引流，可展示给最终用户
         "commercialFrontendUrl": config["frontendUrl"],
-        "commercialAdminUrl": config["adminUrl"],
+        # 后台地址属于服务端敏感信息，开源版不暴露给浏览器侧
+        # commercialAdminUrl 已从 runtime 返回中移除
     }
 
     if not configured:
         if health_ok:
-            runtime["commercialBridgeMessage"] = (
+            runtime["commercialBridgeMessage"] = _redact_urls(
                 f"{health_message}，但尚未配置桥接 token 或桥接接口，当前使用本地兜底"
             )
         else:
-            runtime["commercialBridgeMessage"] = (
+            runtime["commercialBridgeMessage"] = _redact_urls(
                 f"{health_message or '未配置商业版桥接，且健康检查不可用'}，当前使用本地兜底"
             )
         return runtime
@@ -431,14 +449,16 @@ async def get_commercial_bridge_runtime() -> dict[str, Any]:
     try:
         await _request_bridge(config, "GET", "/health")
         runtime["commercialBridgeConnected"] = True
-        runtime["commercialBridgeMessage"] = (
+        runtime["commercialBridgeMessage"] = _redact_urls(
             f"商业版桥接已接通，{health_message}" if health_message else "商业版桥接已接通"
         )
     except CommercialBridgeError as exc:
         if health_ok:
-            runtime["commercialBridgeMessage"] = f"{health_message}，但桥接未完成: {exc}"
+            runtime["commercialBridgeMessage"] = _redact_urls(
+                f"{health_message}，但桥接未完成: {exc}"
+            )
         else:
-            runtime["commercialBridgeMessage"] = str(exc)
+            runtime["commercialBridgeMessage"] = _redact_urls(str(exc))
 
     return runtime
 
@@ -740,8 +760,196 @@ async def proxy_append_feedback_reply(
     return data
 
 
+# ---------------------------------------------------------------------------
+# CHANGELOG.md parser — reads the project changelog and converts it into the
+# `logs` structure consumed by the About page's "更新日志" section.
+# ---------------------------------------------------------------------------
+
+_CHANGELOG_CACHE: dict[str, Any] = {"logs": None, "mtime": 0.0, "ts": 0.0}
+_CHANGELOG_TTL = 60.0  # seconds
+
+# Matches: ## [Unreleased]  |  ## [v1.2.0] - 2026-07-15  |  ## [1.2.0] - 2026-07-15
+_CHANGELOG_VERSION_RE = re.compile(
+    r"^##\s+\[(Unreleased|[vV]?\d+(?:\.\d+)*)\](?:\s*-\s*(\d{4}-\d{2}-\d{2}))?\s*$"
+)
+# Matches: ### 新增  |  ### 变更  |  ### 修复  |  ### 功能亮点
+_CHANGELOG_SECTION_RE = re.compile(r"^###\s+(.+?)\s*$")
+# Matches: - **title**：desc   |   - **title**: desc   |   - prefix **title** — desc
+_CHANGELOG_ENTRY_RE = re.compile(
+    r"^-\s+(?:[^*\n]*?)?\*\*(.+?)\*\*(?:\s*[：:]\s*|\s+[—-]\s+)(.+)$"
+)
+# Matches any other list entry without bold title
+_CHANGELOG_PLAIN_ENTRY_RE = re.compile(r"^-\s+(.+)$")
+
+
+def _find_changelog_path() -> Path | None:
+    """Locate CHANGELOG.md from a few candidate locations."""
+    candidates = [
+        # Source tree root: apps/api/app/services/ -> parents[4] = project root
+        Path(__file__).resolve().parents[4] / "CHANGELOG.md",
+        # Docker container mount point (see docker-compose.yml api volumes)
+        Path("/app/CHANGELOG.md"),
+        # Current working directory fallback
+        Path.cwd() / "CHANGELOG.md",
+    ]
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def _clean_inline_markdown(text: str) -> str:
+    """Strip **bold** and `code` inline markdown markers for plain display."""
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    return text
+
+
+def _parse_changelog(content: str) -> list[dict[str, Any]]:
+    """Parse Keep a Changelog content into the frontend `logs` structure.
+
+    Each version header (## [...]) becomes one log entry. Each ### subsection
+    becomes a section with an `items` array of {t, d} entries. The first
+    freeform paragraph under a version header is used as the log description.
+    """
+    lines = content.splitlines()
+    logs: list[dict[str, Any]] = []
+    current_log: dict[str, Any] | None = None
+    current_section: dict[str, Any] | None = None
+
+    for line in lines:
+        version_match = _CHANGELOG_VERSION_RE.match(line)
+        if version_match:
+            if current_log is not None:
+                logs.append(current_log)
+            ver = version_match.group(1)
+            date = version_match.group(2) or ""
+            if ver.lower() == "unreleased":
+                # 项目实际工作流：每次 push 到 main 即视为已发布。
+                # [Unreleased] 段在展示层标记为"最新版本"，日期由
+                # parse_changelog_to_logs() 用文件 mtime 补充。
+                v_label = "最新版本"
+            else:
+                v_label = ver if ver.lower().startswith("v") else f"v{ver}"
+            current_log = {
+                "v": v_label,
+                "t": date,
+                "tone": "major" if not logs else "minor",
+                "d": "",
+                "sections": [],
+                "tags": [],
+            }
+            current_section = None
+            continue
+
+        section_match = _CHANGELOG_SECTION_RE.match(line)
+        if section_match and current_log is not None:
+            section_title = section_match.group(1).strip()
+            current_section = {"t": section_title, "items": []}
+            current_log["sections"].append(current_section)
+            if section_title not in current_log["tags"]:
+                current_log["tags"].append(section_title)
+            continue
+
+        entry_match = _CHANGELOG_ENTRY_RE.match(line)
+        if entry_match and current_log is not None:
+            title = entry_match.group(1).strip()
+            desc = _clean_inline_markdown(entry_match.group(2).strip())
+            if current_section is None:
+                current_section = {"t": "更新", "items": []}
+                current_log["sections"].append(current_section)
+            current_section["items"].append({"t": title, "d": desc})
+            continue
+
+        plain_match = _CHANGELOG_PLAIN_ENTRY_RE.match(line)
+        if plain_match and current_log is not None:
+            text = _clean_inline_markdown(plain_match.group(1).strip())
+            if current_section is None:
+                current_section = {"t": "更新", "items": []}
+                current_log["sections"].append(current_section)
+            current_section["items"].append({"t": "", "d": text})
+            continue
+
+        # Freeform paragraph (e.g. v1.0.0 intro line) → use as log description
+        stripped = line.strip()
+        if stripped and current_log is not None and not line.startswith("#"):
+            if not current_log["d"]:
+                current_log["d"] = stripped
+
+    if current_log is not None:
+        logs.append(current_log)
+
+    # Filter out empty versions (e.g. an empty [Unreleased] right after release)
+    # and build summary descriptions for versions that don't have one.
+    result: list[dict[str, Any]] = []
+    for log in logs:
+        total_items = sum(len(s.get("items", [])) for s in log["sections"])
+        if total_items == 0 and not log["d"]:
+            continue
+        if not log["d"]:
+            counts = []
+            for s in log["sections"]:
+                n = len(s.get("items", []))
+                if n > 0:
+                    counts.append(f"{n} 项{s['t']}")
+            log["d"] = f"本次更新包含 {'、'.join(counts)}。" if counts else ""
+        result.append(log)
+
+    return result
+
+
+def parse_changelog_to_logs() -> list[dict[str, Any]]:
+    """Read and parse CHANGELOG.md into the frontend `logs` structure.
+
+    Returns an empty list if the file is missing or parsing fails. The
+    parsed result is cached for ``_CHANGELOG_TTL`` seconds and re-reads
+    when the file mtime changes.
+    """
+    now = time.monotonic()
+    path = _find_changelog_path()
+    if path is None:
+        return []
+
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return []
+
+    cache = _CHANGELOG_CACHE
+    if (
+        cache["logs"] is not None
+        and cache["mtime"] == mtime
+        and (now - cache["ts"]) < _CHANGELOG_TTL
+    ):
+        return cache["logs"]  # type: ignore[return-value]
+
+    try:
+        content = path.read_text(encoding="utf-8")
+        logs = _parse_changelog(content)
+    except Exception:
+        logger.warning("Failed to parse CHANGELOG.md", exc_info=True)
+        return []
+
+    # The [Unreleased] section is shown as "最新版本" (latest released).
+    # Backfill its date from the file mtime, which reflects the most recent
+    # git push that modified CHANGELOG.md.
+    if logs and logs[0].get("v") == "最新版本" and not logs[0].get("t"):
+        try:
+            logs[0]["t"] = time.strftime("%Y-%m-%d", time.localtime(mtime))
+        except Exception:
+            pass
+
+    cache["logs"] = logs
+    cache["mtime"] = mtime
+    cache["ts"] = now
+    return logs
+
+
 def default_about_content() -> dict[str, Any]:
-    return copy.deepcopy(
+    content = copy.deepcopy(
         {
             "heroTitle": "XianYuAssistant 开源版",
             "heroBadgeText": "付费广告商业桥",
@@ -870,5 +1078,11 @@ def default_about_content() -> dict[str, Any]:
             },
         }
     )
+    # Override the static default logs with the real CHANGELOG.md content
+    # so the About page reflects actual version iteration history.
+    changelog_logs = parse_changelog_to_logs()
+    if changelog_logs:
+        content["logs"] = changelog_logs
+    return content
 
 

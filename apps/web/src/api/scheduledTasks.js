@@ -18,3 +18,11 @@ export function runScheduledTask(id) {
   // returning a fake "triggered" acknowledgement.
   return request({ url: `/scheduled-tasks/${id}/run`, method: 'post', timeout: 310000 })
 }
+
+export function setScheduledTaskEnabled(id, enabled) {
+  return request({
+    url: `/scheduled-tasks/${id}/enabled`,
+    method: 'patch',
+    data: { enabled: enabled ? 1 : 0 },
+  })
+}

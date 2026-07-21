@@ -3,9 +3,6 @@
     <div v-if="error" class="global-notice error">{{ error }}</div>
     <div v-if="warning" class="global-notice warning" role="status">{{ warning }}</div>
     <div v-if="success" class="global-notice success">{{ success }}</div>
-    <div class="global-notice capability-notice" role="status">
-      当前版本没有安全的发货记录自动重试执行器。请先在闲鱼 App 核对买家消息与平台发货状态；确需再次操作时，请前往“订单管理”使用手动发货闭环。
-    </div>
 
     <CardPanel title="发货记录筛选">
       <div class="toolbar wrap">
@@ -34,6 +31,13 @@
         <input v-model="query.orderKeyword" class="input grow" placeholder="订单号 / 外部订单号" />
         <AppButton type="primary" :loading="recordsLoading" @click="search">搜索</AppButton>
         <AppButton @click="resetFilters">重置</AppButton>
+        <AppButton
+          :disabled="recordsAvailable !== true || selectedIds.length === 0 || batchRetrying"
+          :loading="batchRetrying"
+          @click="batchRetry"
+        >
+          {{ batchRetrying ? '重试中...' : `重试选中 (${selectedIds.length})` }}
+        </AppButton>
         <AppButton :disabled="recordsAvailable !== true || exportLoading" @click="exportCsv">
           {{ exportLoading ? '导出中...' : '导出 CSV' }}
         </AppButton>
@@ -60,9 +64,11 @@
       </EmptyState>
       <BaseTable
         v-else-if="recordsAvailable === true"
+        v-model:selected-keys="selectedIds"
         :columns="columns"
         :rows="rows"
         :row-key="row => row.id"
+        selectable
         @row-click="showDetail"
       >
         <template #goods="{ row }">
@@ -97,6 +103,17 @@
         <template #op="{ row }">
           <div class="inline-actions">
             <button class="link" @click.stop="showDetail(row)">详情</button>
+            <button
+              v-if="row.canRetry"
+              class="link"
+              :disabled="retryingId === row.id"
+              @click.stop="retryRecord(row)"
+            >{{ retryingId === row.id ? '重试中...' : '重试' }}</button>
+            <button
+              v-if="row.canScheduleRedelivery"
+              class="link"
+              @click.stop="openSchedule(row)"
+            >安排重新发货</button>
           </div>
         </template>
       </BaseTable>
@@ -132,6 +149,39 @@
         <div class="section-title">错误信息</div>
         <div class="content-box">{{ detailView.errorMessageText }}</div>
       </div>
+
+      <div v-if="detailView.canRetry || detailView.canScheduleRedelivery" class="panel-block detail-actions">
+        <AppButton
+          v-if="detailView.canRetry"
+          type="primary"
+          :loading="retryingId === detailView.id"
+          @click="retryRecord(detailView)"
+        >{{ retryingId === detailView.id ? '重试中...' : '重试发货' }}</AppButton>
+        <AppButton
+          v-if="detailView.canScheduleRedelivery"
+          @click="openSchedule(detailView)"
+        >安排重新发货</AppButton>
+        <span v-if="retryMessage" class="retry-message">{{ retryMessage }}</span>
+      </div>
+    </CardPanel>
+
+    <CardPanel v-if="redeliveryTarget" title="安排重新发货" style="margin-top: 16px">
+      <div class="form-field">
+        <label>记录</label>
+        <div class="content-box compact">
+          #{{ redeliveryTarget.id }} / {{ redeliveryTarget.goodsTitleText || redeliveryTarget.goodsTitle || '-' }}
+        </div>
+      </div>
+      <div class="form-field">
+        <label>Cron 表达式</label>
+        <input v-model="redeliveryForm.cronExpression" class="input" placeholder="0 0/15 * * * ?" />
+      </div>
+      <div class="inline-actions">
+        <AppButton type="primary" :loading="scheduling" @click="submitScheduleRedelivery">
+          {{ scheduling ? '安排中...' : '创建重新发货任务' }}
+        </AppButton>
+        <AppButton @click="closeSchedule">取消</AppButton>
+      </div>
     </CardPanel>
   </div>
 </template>
@@ -144,24 +194,34 @@ import Badge from '../components/Badge.vue'
 import AppButton from '../components/AppButton.vue'
 import Pagination from '../components/Pagination.vue'
 import EmptyState from '../components/EmptyState.vue'
-import { getDeliveryRecordDetail, getDeliveryRecords } from '../api/autoDelivery.js'
+import { getDeliveryRecordDetail, getDeliveryRecords, retryDeliveryRecord, scheduleRedelivery } from '../api/autoDelivery.js'
 import { camelizeKeys, recordsOf, recordsOfOrThrow, totalOf } from '../utils/apiData.js'
 import { createLatestRequestGuard, listRefreshRequestConfig } from '../utils/latestRequest.js'
 import {
   buildDeliveryRecordDetailViewModel,
-  buildDeliveryRecordRowViewModel
+  buildDeliveryRecordRowViewModel,
+  buildScheduleRedeliveryPayload
 } from '../utils/deliveryRecordsPageState.js'
 
 const records = ref([])
 const total = ref(0)
+const selectedIds = ref([])
 const detail = ref(null)
+const redeliveryTarget = ref(null)
 const error = ref('')
 const warning = ref('')
 const success = ref('')
 const recordsAvailable = ref(null)
 const recordsLoading = ref(true)
 const exportLoading = ref(false)
+const batchRetrying = ref(false)
+const scheduling = ref(false)
 const recordsRequestGuard = createLatestRequestGuard()
+const retryingId = ref(null)
+const retryMessage = ref('')
+const redeliveryForm = reactive({
+  cronExpression: '0 0/15 * * * ?'
+})
 
 const query = reactive({
   status: '',
@@ -279,6 +339,100 @@ function goPage(page) {
   load()
 }
 
+async function retryRecord(row) {
+  if (!row || !row.id) return
+  if (retryingId.value === row.id) return
+  clearNotice()
+  retryMessage.value = ''
+  retryingId.value = row.id
+  try {
+    const res = await retryDeliveryRecord(row.id)
+    const data = camelizeKeys(res.data || {})
+    const status = data.status || ''
+    const message = data.message || '重试请求已提交'
+    if (status === 'success') {
+      success.value = `重试成功：${message}`
+    } else if (status === 'failed') {
+      error.value = `重试失败：${message}`
+    } else if (status === 'in_progress' || status === 'pending' || status === 'message_sent') {
+      warning.value = `重试进行中：${message}`
+    } else if (status === 'unknown') {
+      warning.value = `重试结果未知：${message}`
+    } else {
+      success.value = message
+    }
+    retryMessage.value = message
+    // 重新加载列表与详情
+    await load()
+    if (detail.value && detail.value.id === row.id) {
+      try {
+        const detailRes = await getDeliveryRecordDetail(row.id)
+        detail.value = camelizeKeys(detailRes.data)
+      } catch (_e) { /* ignore detail refresh error */ }
+    }
+  } catch (requestError) {
+    error.value = requestError.message || '重试发货记录失败'
+    retryMessage.value = error.value
+  } finally {
+    retryingId.value = null
+  }
+}
+
+async function batchRetry() {
+  if (batchRetrying.value) return
+  if (!recordsAvailable.value || !selectedIds.value.length) return
+  clearNotice()
+  batchRetrying.value = true
+  let successCount = 0
+  let failedCount = 0
+  for (const id of selectedIds.value) {
+    try {
+      await retryDeliveryRecord(id)
+      successCount += 1
+    } catch {
+      failedCount += 1
+    }
+  }
+  if (successCount) {
+    success.value = `已请求重试 ${successCount} 条记录${failedCount ? `，${failedCount} 条失败` : ''}`
+  } else if (failedCount) {
+    error.value = `${failedCount} 条记录重试失败`
+  }
+  await load()
+  batchRetrying.value = false
+}
+
+function openSchedule(row) {
+  redeliveryTarget.value = row
+  redeliveryForm.cronExpression = '0 0/15 * * * ?'
+}
+
+function closeSchedule() {
+  redeliveryTarget.value = null
+}
+
+async function submitScheduleRedelivery() {
+  if (!redeliveryTarget.value?.id) return
+  if (scheduling.value) return
+  clearNotice()
+  const payload = buildScheduleRedeliveryPayload(redeliveryForm)
+  if (!payload.cronExpression) {
+    error.value = 'Cron 表达式必填'
+    return
+  }
+  scheduling.value = true
+  try {
+    await scheduleRedelivery(redeliveryTarget.value.id, payload)
+    success.value = `已为记录 #${redeliveryTarget.value.id} 创建重新发货任务`
+    redeliveryTarget.value = null
+    await load()
+  } catch (requestError) {
+    error.value = requestError.message || '创建重新发货任务失败'
+  } finally {
+    scheduling.value = false
+  }
+}
+
 function escapeCsv(value) {
   return `"${String(value ?? '').replaceAll('"', '""')}"`
 }
@@ -325,7 +479,7 @@ async function exportCsv() {
       return
     }
 
-    const headers = ['ID', '订单号', '商品', '买家', '时机', '方式', '状态', '进度', '错误', '创建时间']
+    const headers = ['ID', '订单号', '商品', '买家', '卖家', '时机', '方式', '状态', '进度', '错误', '订单时间', '创建时间']
     const lines = [
       headers.join(','),
       ...exportRows.map(row => ([
@@ -333,11 +487,13 @@ async function exportCsv() {
         row.orderId,
         row.goodsTitleText,
         row.buyerNameText,
+        row.sellerNameText,
         row.timingText,
         row.deliveryModeText,
         row.deliveryStatusText,
         row.deliveryProgressText,
         row.errorMessage || '',
+        row.purchaseTimeText,
         row.createdTimeText
       ]).map(escapeCsv).join(','))
     ]
@@ -441,6 +597,19 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
+}
+
+.detail-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #e6ecf5;
+}
+
+.retry-message {
+  color: #526079;
+  font-size: 13px;
 }
 
 .form-field {

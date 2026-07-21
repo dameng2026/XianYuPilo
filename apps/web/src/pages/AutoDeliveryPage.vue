@@ -68,14 +68,15 @@
           <AppButton type="primary" style="width:100%;margin-bottom:8px" :disabled="!goodsAvailable || filteredConfigUnknownCount > 0" @click="showBatchDialog = true">批量设置</AppButton>
           <AppButton style="width:100%;margin-bottom:8px" @click="goSourceLibrary">打开货源库</AppButton>
           <AppButton type="danger" style="width:100%;margin-bottom:8px" :disabled="!goodsAvailable || filteredConfigUnknownCount > 0" @click="batchDelete">批量删除配置</AppButton>
-          <AppButton style="width:100%" @click="scanPendingOrders">扫描待发货订单</AppButton>
+          <AppButton style="width:100%;margin-bottom:8px" @click="scanPendingOrders">扫描待发货订单</AppButton>
+          <AppButton style="width:100%" :loading="recoverLoading" @click="recoverPendingDeliveries">立即补发未发货订单</AppButton>
         </CardPanel>
       </div>
 
       <div class="main-content">
         <div class="timing-notice">
           <span class="timing-notice-icon">i</span>
-          <span><b>付款后发货</b>会由系统定时扫描自动执行；<b>确认收货后赠送</b>和<b>好评后赠送</b>可在发货记录页手动触发，也可接入后续事件自动化。</span>
+          <span><b>付款后发货</b>会由系统定时扫描自动执行；<b>确认收货后赠送</b>和<b>好评后赠送</b>可在发货记录页手动触发，也可接入后续事件自动化。漏发的订单每 10 分钟自动补发一次，也可点击"立即补发未发货订单"手动触发。</span>
         </div>
 
         <CardPanel>
@@ -284,6 +285,14 @@
                   自动停用
                 </label>
               </div>
+
+              <div class="form-row">
+                <label>自动确认发货</label>
+                <label class="checkbox-label">
+                  <input v-model="configForm.autoConfirmShipment" type="checkbox" />
+                  发送成功后调用闲鱼平台确认发货，并把订单标记为已发货
+                </label>
+              </div>
             </div>
           </div>
 
@@ -368,7 +377,8 @@ import {
   getDeliveryStats,
   getGoodsDeliveryConfigs,
   saveGoodsDeliveryConfig,
-  scanPendingOrders as scanApi
+  scanPendingOrders as scanApi,
+  recoverPendingDeliveries as recoverApi
 } from '../api/autoDelivery.js'
 import { accountName } from '../utils/format.js'
 import { recordsOf } from '../utils/apiData.js'
@@ -434,7 +444,10 @@ const configForm = reactive({
   segmentSend: false,
   retryCount: 3,
   alertThreshold: 5,
-  autoDisableOnLowStock: false
+  autoDisableOnLowStock: false,
+  // 卡密/文本发送成功后是否调用闲鱼平台接口确认发货并把订单标记为已发货。
+  // 不开启时只发买家消息，订单状态需手动同步。
+  autoConfirmShipment: false
 })
 
 const batchForm = reactive({
@@ -751,6 +764,7 @@ function fillConfigForm(config = {}) {
     retryCount: config.retryCount ?? 3,
     alertThreshold: config.alertThreshold ?? 5,
     autoDisableOnLowStock: !!config.autoDisableOnLowStock,
+    autoConfirmShipment: !!config.autoConfirmShipment,
     _lastSourceContent: config.content || ''
   })
 }
@@ -878,7 +892,8 @@ async function saveConfig() {
       segmentSend: configForm.segmentSend,
       retryCount: configForm.retryCount,
       alertThreshold: configForm.alertThreshold,
-      autoDisableOnLowStock: configForm.autoDisableOnLowStock
+      autoDisableOnLowStock: configForm.autoDisableOnLowStock,
+      autoConfirmShipment: !!configForm.autoConfirmShipment
     })
     success.value = '配置已保存'
     await Promise.all([loadGoods(), loadStats()])
@@ -982,6 +997,21 @@ async function scanPendingOrders() {
     success.value = `已触发待发货订单扫描${countText}，请前往发货记录页查看结果。`
   } catch (e) {
     error.value = e.message || '扫描失败'
+  }
+}
+
+const recoverLoading = ref(false)
+async function recoverPendingDeliveries() {
+  recoverLoading.value = true
+  try {
+    const res = await recoverApi()
+    const d = res?.data || {}
+    success.value = d.message || `补发扫描完成：扫描 ${d.scanned ?? 0} 单，补发 ${d.recovered ?? 0} 单，跳过 ${d.skipped ?? 0} 单，失败 ${d.failed ?? 0} 单`
+    await loadStats()
+  } catch (e) {
+    error.value = e.message || '补发失败'
+  } finally {
+    recoverLoading.value = false
   }
 }
 

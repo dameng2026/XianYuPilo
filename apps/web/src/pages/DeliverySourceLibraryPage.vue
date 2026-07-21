@@ -8,15 +8,23 @@
         <div class="stat-icon-circle blue"><span class="stat-icon-svg">📦</span></div>
         <div class="stat-info">
           <div class="stat-label">货源总数</div>
-          <div class="stat-value">{{ sourceTotal }}</div>
+          <div class="stat-value">{{ stats.total }}</div>
           <div class="stat-trend muted">统一管理的货源条目</div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon-circle orange"><span class="stat-icon-svg">🔑</span></div>
+        <div class="stat-info">
+          <div class="stat-label">卡密发货</div>
+          <div class="stat-value">{{ stats.cardSources }}</div>
+          <div class="stat-trend muted">从卡密分组自动扣减</div>
         </div>
       </div>
       <div class="stat-card">
         <div class="stat-icon-circle green"><span class="stat-icon-svg">📝</span></div>
         <div class="stat-info">
           <div class="stat-label">文本发货</div>
-          <div class="stat-value">{{ sourceTotal }}</div>
+          <div class="stat-value">{{ stats.textSources }}</div>
           <div class="stat-trend muted">固定文案直接发送</div>
         </div>
       </div>
@@ -24,7 +32,7 @@
         <div class="stat-icon-circle purple"><span class="stat-icon-svg">🔗</span></div>
         <div class="stat-info">
           <div class="stat-label">已配置商品</div>
-          <div class="stat-value">{{ totalConfiguredCount }}</div>
+          <div class="stat-value">{{ stats.totalConfigured }}</div>
           <div class="stat-trend muted">货源绑定商品总数</div>
         </div>
       </div>
@@ -43,6 +51,16 @@
           <div class="stat-value">{{ aiStatus.configured ? '可用' : '未配置' }}</div>
           <div class="stat-trend" :class="aiStatus.configured ? 'muted' : 'down'">
             {{ aiStatus.configured ? 'AI 模型已就绪' : '请先配置通用模型' }}
+          </div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon-circle red"><span class="stat-icon-svg">⚠</span></div>
+        <div class="stat-info">
+          <div class="stat-label">库存预警</div>
+          <div class="stat-value">{{ stats.lowStock }}</div>
+          <div class="stat-trend" :class="stats.lowStock > 0 ? 'down' : 'muted'">
+            {{ stats.lowStock > 0 ? '卡密库存不足，请补充' : '库存充足' }}
           </div>
         </div>
       </div>
@@ -70,6 +88,17 @@
         <template #content="{ row }">
           <div class="content-preview">{{ row.content }}</div>
         </template>
+        <template #mode="{ row }">
+          <Badge :type="row.deliveryMode === 'card' ? 'orange' : 'gray'">
+            {{ row.deliveryMode === 'card' ? '卡密发货' : '文本发货' }}
+          </Badge>
+        </template>
+        <template #stock="{ row }">
+          <span v-if="row.deliveryMode === 'card'" :class="['stock-cell', { low: (row.cardRemainCount ?? 0) <= 0 }]">
+            剩余 {{ row.cardRemainCount ?? 0 }}
+          </span>
+          <span v-else class="subtle">文本</span>
+        </template>
         <template #usage="{ row }">
           <Badge>{{ row.usageCount || 0 }} 个商品</Badge>
         </template>
@@ -90,12 +119,65 @@
           <input v-model="form.title" class="input" maxlength="200" placeholder="给用户和 AI 模型看的标题" />
         </div>
         <div class="form-row">
-          <label>正文</label>
-          <textarea v-model="form.content" rows="6" placeholder="实际发货文本内容"></textarea>
+          <label>
+            正文
+            <button
+              v-if="form.deliveryMode === 'card'"
+              type="button"
+              class="placeholder-btn"
+              @click="insertCardPlaceholder"
+            >+ 插入 {卡密占位}</button>
+          </label>
+          <textarea
+            ref="contentTextareaRef"
+            v-model="form.content"
+            rows="6"
+            :placeholder="form.deliveryMode === 'card' ? '实际发货文本，需包含 {卡密占位}，发货时会自动替换为认领到的卡密' : '实际发货文本内容'"
+          ></textarea>
         </div>
         <div class="form-row">
           <label>备注</label>
           <textarea v-model="form.remark" rows="3" maxlength="500" placeholder="可选备注"></textarea>
+        </div>
+        <div class="form-row">
+          <label>发货类型</label>
+          <div class="mode-cards">
+            <label class="mode-card" :class="{ active: form.deliveryMode === 'text' }">
+              <input v-model="form.deliveryMode" type="radio" value="text" @change="onDeliveryModeChange" />
+              <span class="mode-card-radio"></span>
+              <div class="mode-card-body">
+                <span class="mode-card-title">文本发送</span>
+                <span class="mode-card-desc">通过文本消息发送给买家，适合固定文案内容</span>
+              </div>
+            </label>
+            <label class="mode-card" :class="{ active: form.deliveryMode === 'card' }">
+              <input v-model="form.deliveryMode" type="radio" value="card" @change="onDeliveryModeChange" />
+              <span class="mode-card-radio"></span>
+              <div class="mode-card-body">
+                <span class="mode-card-title">卡密发送</span>
+                <span class="mode-card-desc">从卡密库中选择一张卡密替换占位符后发送</span>
+              </div>
+            </label>
+          </div>
+        </div>
+        <div v-if="form.deliveryMode === 'card'" class="form-row">
+          <label>卡密分组</label>
+          <select v-model="form.cardGroupId" class="input">
+            <option value="" disabled>请选择卡密分组</option>
+            <option v-for="g in cardGroups" :key="g.id" :value="g.id">
+              {{ g.groupName }}（剩余 {{ g.remainCount ?? 0 }} / 共 {{ g.totalCount ?? 0 }}）
+            </option>
+          </select>
+          <div v-if="cardGroupsLoading" class="subtle" style="margin-top:8px;font-size:13px">加载中…</div>
+          <div v-else-if="cardGroups.length === 0" class="subtle danger-text" style="margin-top:8px;font-size:13px">
+            暂无卡密分组，请先到「卡密仓库」创建分组并导入卡密
+          </div>
+          <div v-else-if="selectedCardGroup" class="stock-display" style="margin-top:10px">
+            <span class="stock-label-text">当前剩余：</span>
+            <span :class="['stock-value-text', { low: selectedCardRemainCount <= 0 }]">
+              {{ selectedCardRemainCount }} 张
+            </span>
+          </div>
         </div>
       </div>
       <div class="toolbar" style="justify-content:flex-start">
@@ -297,6 +379,7 @@ import {
   updateDeliverySource
 } from '../api/autoDelivery.js'
 import { getAiProviderStatus } from '../api/aiProvider.js'
+import { getCards } from '../api/cards.js'
 import { recordsOf, totalOf } from '../utils/apiData.js'
 import { confirmAction } from '../utils/confirmAction.js'
 import { accountName } from '../utils/format.js'
@@ -316,6 +399,11 @@ let sourceRequestSequence = 0
 let detailRequestSequence = 0
 let recommendationRequestSequence = 0
 const editing = ref(null)
+// 卡密发货相关
+const cardGroups = ref([])
+const cardGroupsLoading = ref(false)
+const contentTextareaRef = ref(null)
+const CARD_PLACEHOLDER = '{卡密占位}'
 const configuredGoods = ref([])
 const allGoods = ref([])
 const recommendedGoods = ref([])
@@ -354,12 +442,16 @@ const query = reactive({
 const form = reactive({
   title: '',
   content: '',
-  remark: ''
+  remark: '',
+  deliveryMode: 'text',
+  cardGroupId: ''
 })
 
 const columns = [
   { key: 'title', title: '货源信息' },
   { key: 'content', title: '正文' },
+  { key: 'mode', title: '发货类型' },
+  { key: 'stock', title: '库存' },
   { key: 'usage', title: '已配置商品' },
   { key: 'op', title: '操作' }
 ]
@@ -382,6 +474,28 @@ const configuredGoodsIds = computed(() => new Set(configuredGoods.value.map(row 
 
 const totalConfiguredCount = computed(() => {
   return rows.value.reduce((sum, row) => sum + (Number(row.usageCount) || 0), 0)
+})
+
+// 货源板块统计概览（含卡密/文本模式分布与库存预警）
+const stats = computed(() => {
+  const list = rows.value || []
+  const total = list.length
+  const cardSources = list.filter(r => r.deliveryMode === 'card').length
+  const textSources = list.filter(r => r.deliveryMode !== 'card').length
+  const totalConfigured = list.reduce((sum, r) => sum + (Number(r.usageCount) || 0), 0)
+  const lowStock = list.filter(r => r.deliveryMode === 'card' && (r.cardRemainCount ?? 0) <= 0).length
+  return { total, cardSources, textSources, totalConfigured, lowStock }
+})
+
+const selectedCardGroup = computed(() => {
+  const id = form.cardGroupId
+  if (!id) return null
+  return cardGroups.value.find(g => String(g.id) === String(id)) || null
+})
+
+const selectedCardRemainCount = computed(() => {
+  const group = selectedCardGroup.value
+  return group ? (group.remainCount ?? 0) : 0
 })
 
 const normalizedConfiguredGoods = computed(() => decorateGoodsRows(configuredGoods.value, false))
@@ -570,7 +684,14 @@ function goSourcePage(page) {
 function openCreate() {
   if (sourcesAvailable.value !== true || mutationBusy.value) return
   editing.value = {}
-  Object.assign(form, { title: '', content: '', remark: '' })
+  Object.assign(form, {
+    title: '',
+    content: '',
+    remark: '',
+    deliveryMode: 'text',
+    cardGroupId: ''
+  })
+  ensureCardGroupsLoaded()
 }
 
 function editSource(row) {
@@ -579,7 +700,54 @@ function editSource(row) {
   Object.assign(form, {
     title: row.title || '',
     content: row.content || '',
-    remark: row.remark || ''
+    remark: row.remark || '',
+    deliveryMode: row.deliveryMode === 'card' ? 'card' : 'text',
+    cardGroupId: row.cardGroupId ?? ''
+  })
+  ensureCardGroupsLoaded()
+}
+
+async function ensureCardGroupsLoaded() {
+  if (cardGroups.value.length > 0 || cardGroupsLoading.value) return
+  cardGroupsLoading.value = true
+  try {
+    const res = await getCards({ current: 1, size: 200 })
+    cardGroups.value = recordsOf(res?.data)
+  } catch (e) {
+    cardGroups.value = []
+    error.value = `卡密分组加载失败：${e.message || '请稍后重试'}`
+  } finally {
+    cardGroupsLoading.value = false
+  }
+}
+
+function onDeliveryModeChange() {
+  if (form.deliveryMode === 'card') {
+    ensureCardGroupsLoaded()
+  } else {
+    form.cardGroupId = ''
+  }
+}
+
+function insertCardPlaceholder() {
+  const ta = contentTextareaRef.value
+  if (!ta) {
+    form.content = (form.content || '') + CARD_PLACEHOLDER
+    return
+  }
+  const start = ta.selectionStart ?? form.content.length
+  const end = ta.selectionEnd ?? form.content.length
+  const before = (form.content || '').slice(0, start)
+  const after = (form.content || '').slice(end)
+  form.content = before + CARD_PLACEHOLDER + after
+  requestAnimationFrame(() => {
+    const pos = (before + CARD_PLACEHOLDER).length
+    try {
+      ta.focus()
+      ta.setSelectionRange(pos, pos)
+    } catch {
+      // 忽略光标设置失败
+    }
   })
 }
 
@@ -620,14 +788,32 @@ async function saveSource() {
   if (sourcesAvailable.value !== true || mutationBusy.value) return
   error.value = ''
   success.value = ''
+  // 卡密发货模式校验
+  if (form.deliveryMode === 'card') {
+    if (!form.cardGroupId) {
+      error.value = '卡密发货模式下必须选择一个卡密分组'
+      return
+    }
+    if (!(form.content || '').includes(CARD_PLACEHOLDER)) {
+      error.value = `卡密发货的正文必须包含 ${CARD_PLACEHOLDER} 占位符，否则无法替换实际卡密`
+      return
+    }
+  }
   mutationBusy.value = 'save'
   try {
     const editingId = editing.value?.id
+    const payload = {
+      title: form.title,
+      content: form.content,
+      remark: form.remark,
+      deliveryMode: form.deliveryMode,
+      cardGroupId: form.deliveryMode === 'card' ? form.cardGroupId : null
+    }
     if (editingId) {
-      await updateDeliverySource(editingId, { ...form })
+      await updateDeliverySource(editingId, payload)
       success.value = '货源已更新'
     } else {
-      await createDeliverySource({ ...form })
+      await createDeliverySource(payload)
       success.value = '货源已新增'
     }
     editing.value = null
@@ -1001,7 +1187,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 14px;
   margin-bottom: 16px;
 }
@@ -1059,6 +1245,143 @@ onBeforeUnmount(() => {
 
 .strong {
   font-weight: 600;
+}
+
+/* ===== 卡密发货相关样式 ===== */
+.mode-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+.mode-card {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 18px;
+  border: 1.5px solid #dde1e8;
+  border-radius: 10px;
+  background: #f7f8fa;
+  cursor: pointer;
+  transition: all .18s ease;
+  min-height: 76px;
+}
+
+.mode-card:hover {
+  border-color: #bdd4f9;
+  background: #f2f6fd;
+}
+
+.mode-card.active {
+  border-color: #3b82f6;
+  background: #f0f4ff;
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, .15);
+}
+
+.mode-card input[type='radio'] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.mode-card-radio {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  border: 2px solid #c5cad3;
+  border-radius: 50%;
+  transition: all .18s;
+  position: relative;
+  background: #fff;
+}
+
+.mode-card.active .mode-card-radio {
+  border-color: #2563eb;
+  border-width: 2px;
+}
+
+.mode-card.active .mode-card-radio::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #2563eb;
+}
+
+.mode-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.mode-card-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #374151;
+}
+
+.mode-card.active .mode-card-title {
+  color: #1e40af;
+}
+
+.mode-card-desc {
+  font-size: 12px;
+  color: #6b7280;
+  line-height: 1.5;
+}
+
+.placeholder-btn {
+  margin-left: auto;
+  padding: 3px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  border: 1px solid #3b82f6;
+  background: rgba(59, 130, 246, .06);
+  color: #3b82f6;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background .2s, color .2s;
+}
+
+.placeholder-btn:hover {
+  background: #3b82f6;
+  color: #fff;
+}
+
+.stock-cell {
+  font-weight: 600;
+  color: #059669;
+}
+
+.stock-cell.low {
+  color: #dc2626;
+}
+
+.stock-display {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.stock-label-text {
+  color: #6b7280;
+}
+
+.stock-value-text {
+  font-weight: 600;
+  color: #16a34a;
+}
+
+.stock-value-text.low {
+  color: #dc2626;
 }
 
 .goods-cell {
@@ -1161,6 +1484,9 @@ onBeforeUnmount(() => {
   .stats-grid {
     grid-template-columns: repeat(2, 1fr);
     gap: 10px;
+  }
+  .mode-cards {
+    grid-template-columns: 1fr;
   }
   .stat-card {
     padding: 10px 12px;

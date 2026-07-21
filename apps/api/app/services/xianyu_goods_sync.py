@@ -156,37 +156,6 @@ RGV587 = "RGV587"
 TOKEN_EXPIRED = "FAIL_SYS_TOKEN_EXOIRED"
 TOKEN_EXPIRED_ALIAS = "FAIL_SYS_TOKEN_EXPIRED"
 SESSION_EXPIRED = "FAIL_SYS_SESSION_EXPIRED"
-# 擦亮接口"已擦亮过"软成功码：商品当天已擦亮，视为成功（擦亮目标本就是让商品处于擦亮状态）
-POLISH_ALREADY_DONE = "FAIL_BIZ_IDLEITEM_POLISH_AGAIN"
-# 擦亮接口其他可视为软成功的业务码（如冷却中）
-POLISH_SOFT_SUCCESS_MARKERS = (POLISH_ALREADY_DONE,)
-# Only codes that explicitly prove the mutation was rejected before execution
-# may be retried. Unknown FAIL_BIZ values remain fail-closed because the prefix
-# alone does not establish whether the platform applied the mutation.
-POLISH_RETRY_SAFE_REJECTION_CODES = frozenset({
-    "FAIL_BIZ_ITEM_NOT_ELIGIBLE",
-})
-
-
-class ItemPolishVerificationRequired(RuntimeError):
-    """The platform explicitly required user verification before polishing."""
-
-
-class ItemAlreadyPolished(RuntimeError):
-    """The item already satisfies today's polish intent."""
-
-
-class ItemPolishAuthExpired(RuntimeError):
-    """The platform explicitly rejected the request because auth expired."""
-
-
-class ItemPolishRejected(RuntimeError):
-    """The platform explicitly rejected and did not execute the polish."""
-
-
-class ItemPolishResultUnknown(RuntimeError):
-    """The platform response does not prove whether polish executed."""
-
 
 
 
@@ -536,6 +505,56 @@ def _safe_get_nested(d: dict, *keys, default=""):
     return current if current is not None else default
 
 
+def _parse_want_count_from_labels(card_data: dict) -> int:
+    """
+    从商品卡片标签数据中解析"X人想要"的数字。
+
+    闲鱼列表 API 的 want_count 不直接返回，而是埋在
+    itemLabelDataVO.labelData.{r1,r2,r3}.tagList[].data.content 文字中。
+    形如 "2人想要"。我们遍历所有 r 槽位的 tagList 找匹配。
+    """
+    # 兼容直接传 want_count 字段（详情 API 路径）
+    direct = card_data.get("wantCount") or card_data.get("wantCnt") or card_data.get("wishCount") or card_data.get("favorCount")
+    if direct:
+        try:
+            return int(direct)
+        except (TypeError, ValueError):
+            pass
+
+    label_vo = card_data.get("itemLabelDataVO")
+    if not isinstance(label_vo, dict):
+        return 0
+    label_data = label_vo.get("labelData")
+    if not isinstance(label_data, dict):
+        return 0
+
+    pattern = re.compile(r"(\d+)\s*人想要")
+    # 标签按 r1/r2/r3 排序，优先 r3（通常想要数在 r3），但任何一个槽位命中即可
+    for slot_key in ("r3", "r2", "r1"):
+        slot = label_data.get(slot_key)
+        if not isinstance(slot, dict):
+            continue
+        tag_list = slot.get("tagList")
+        if not isinstance(tag_list, list):
+            continue
+        for tag in tag_list:
+            if not isinstance(tag, dict):
+                continue
+            tag_data = tag.get("data")
+            if not isinstance(tag_data, dict):
+                continue
+            content_text = tag_data.get("content")
+            if not content_text or not isinstance(content_text, str):
+                continue
+            match = pattern.search(content_text)
+            if match:
+                try:
+                    return int(match.group(1))
+                except (TypeError, ValueError):
+                    continue
+    return 0
+
+
 def _parse_card_to_goods(card_data: dict, account_id: int) -> dict:
     """
     将闲鱼 API 返回的 cardData 解析为统一的商品字典。
@@ -573,14 +592,29 @@ def _parse_card_to_goods(card_data: dict, account_id: int) -> dict:
     price = _safe_get_nested(card_data, "priceInfo", "price") or card_data.get("price", "") or card_data.get("soldPrice", "")
     sold_price = _safe_get_nested(card_data, "detailParams", "soldPrice") or card_data.get("soldPrice", "") or price
 
-    # 封面图: 新结构 picInfo.picUrl / detailParams.picUrl，兼容旧字段 coverPic/imageUrl/picUrl
+    # 封面图: 新结构 picInfo.picUrl / detailParams.picUrl，兼容多种旧字段
+    # 优先取嵌套结构（picInfo.picUrl 是闲鱼新版列表 API 的标准字段）
     cover_pic = (
         _safe_get_nested(card_data, "picInfo", "picUrl")
+        or _safe_get_nested(card_data, "picInfo", "url")
         or _safe_get_nested(card_data, "detailParams", "picUrl")
+        or _safe_get_nested(card_data, "detailParams", "picUrlNew")
         or card_data.get("coverPic", "")
         or card_data.get("imageUrl", "")
+        or card_data.get("mainImageUrl", "")
+        or card_data.get("mainPic", "")
+        or card_data.get("mainPicUrl", "")
+        or card_data.get("coverUrl", "")
+        or card_data.get("thumbUrl", "")
         or card_data.get("picUrl", "")
+        or card_data.get("pic", "")
+        or card_data.get("image", "")
     )
+    # 协议兜底：将 http:// 转为 https://，避免被前端 https-only CSP 拒绝
+    if cover_pic and isinstance(cover_pic, str) and cover_pic.lower().startswith("http://"):
+        cover_pic = "https://" + cover_pic[len("http://"):]
+    elif cover_pic and isinstance(cover_pic, str) and cover_pic.startswith("//"):
+        cover_pic = "https:" + cover_pic
 
     goods = {
         "account_id": account_id,
@@ -592,9 +626,11 @@ def _parse_card_to_goods(card_data: dict, account_id: int) -> dict:
         "image_url": cover_pic,
         "stock": str(card_data.get("quantity", "") or card_data.get("stock", "")),
         "quantity": int(card_data.get("quantity", 0) or card_data.get("stock", 0)),
-        "exposure_count": int(card_data.get("exposureCount", 0) or 0),
-        "view_count": int(card_data.get("viewCount", 0) or card_data.get("ipv", 0) or 0),
-        "want_count": int(card_data.get("wantCount", 0) or card_data.get("want", 0) or 0),
+        # 统计字段：列表 API 仅返回想要数（埋在 itemLabelDataVO.labelData 的标签文字中），
+        # 曝光数 / 浏览数 需要详情 API（详见 _merge_detail_info），但详情 API 经常被风控拦截。
+        "exposure_count": int(card_data.get("exposureCount", 0) or card_data.get("exposureNum", 0) or card_data.get("exposure", 0) or 0),
+        "view_count": int(card_data.get("viewCount", 0) or card_data.get("browseCnt", 0) or card_data.get("browseCount", 0) or card_data.get("pv", 0) or card_data.get("uv", 0) or 0),
+        "want_count": _parse_want_count_from_labels(card_data),
         "detail_url": card_data.get("detailUrl", "") or card_data.get("itemUrl", ""),
         "detail_info": card_data.get("detailInfo", "") or card_data.get("desc", ""),
         "description": card_data.get("detailInfo", "") or card_data.get("desc", ""),
@@ -635,7 +671,8 @@ def _merge_detail_info(goods_dict: dict, detail_data: dict):
         goods_dict["detail_url"] = str(detail_url)
 
     image_urls = []
-    for key in ("images", "imageList", "picList", "albumPics"):
+    # 兼容多套字段命名：images/imageList/picList/albumPics 是常见键
+    for key in ("images", "imageList", "picList", "albumPics", "picUrls", "imageUrls", "imgs"):
         candidates = item_info.get(key)
         if isinstance(candidates, list):
             for candidate in candidates:
@@ -647,11 +684,19 @@ def _merge_detail_info(goods_dict: dict, detail_data: dict):
                         or candidate.get("picUrl")
                         or candidate.get("imageUrl")
                         or candidate.get("imgUrl")
+                        or candidate.get("pic")
                     )
                     if url:
                         image_urls.append(str(url).strip())
         if image_urls:
             break
+    # 兜底：单图字段（detailData.itemDO.picUrl / coverPic 等）
+    if not image_urls:
+        for single_key in ("picUrl", "coverPic", "imageUrl", "mainPic", "mainPicUrl", "coverUrl"):
+            single = item_info.get(single_key)
+            if isinstance(single, str) and single.strip():
+                image_urls.append(single.strip())
+                break
 
     if image_urls:
         deduped = []
@@ -672,6 +717,48 @@ def _merge_detail_info(goods_dict: dict, detail_data: dict):
             goods_dict["stock"] = quantity_int
     except (ValueError, TypeError):
         pass
+
+    # 提取商品统计字段：浏览量、想要数
+    # 兼容多套字段命名：itemDO.browseCnt/wantCnt（主路径）
+    #                itemStats.viewCount/wishCount（新版结构）
+    #                gpageInfo.pv/uv（旧版结构）
+    stat_sources = [
+        item_info,
+        item_info.get("itemStats") if isinstance(item_info.get("itemStats"), dict) else {},
+        item_info.get("gpageInfo") if isinstance(item_info.get("gpageInfo"), dict) else {},
+        detail_data.get("gpageInfo") if isinstance(detail_data.get("gpageInfo"), dict) else {},
+        detail_data.get("itemStats") if isinstance(detail_data.get("itemStats"), dict) else {},
+    ]
+    for src in stat_sources:
+        if not src:
+            continue
+        for src_key, dst_key in (
+            ("browseCnt", "view_count"),
+            ("browseCount", "view_count"),
+            ("viewCount", "view_count"),
+            ("pv", "view_count"),
+            ("uv", "view_count"),
+            ("ipv", "view_count"),
+            ("wantCnt", "want_count"),
+            ("wishCount", "want_count"),
+            ("wantCount", "want_count"),
+            ("favorCount", "want_count"),
+            ("want", "want_count"),
+            ("exposureCount", "exposure_count"),
+            ("exposureNum", "exposure_count"),
+            ("exposure", "exposure_count"),
+            ("impression", "exposure_count"),
+            ("impressionCount", "exposure_count"),
+        ):
+            stat_val = src.get(src_key)
+            if stat_val is None:
+                continue
+            try:
+                val = int(stat_val)
+                if val > 0:
+                    goods_dict[dst_key] = val
+            except (ValueError, TypeError):
+                pass
 
     sold_price = (
         item_info.get("soldPrice")
@@ -729,14 +816,18 @@ def _build_goods_insert_values(goods_dict: dict) -> dict:
         values["status"] = 1 if int(values["status"]) == 0 else 0 if int(values["status"]) == 1 else 2
     if "quantity" in values:
         try:
-            values["quantity"] = int(values["quantity"])
+            qty = int(values["quantity"])
+            # 列表 API 不返回库存：新增商品默认 999（闲鱼常见库存值），
+            # 详情同步成功后会覆盖为真实值；避免本地库存为 0 导致 AI 客服误报"没库存"
+            values["quantity"] = qty if qty > 0 else 999
         except (ValueError, TypeError):
-            values["quantity"] = 0
+            values["quantity"] = 999
     if "stock" in values:
         try:
-            values["stock"] = int(values["stock"])
+            st = int(values["stock"])
+            values["stock"] = st if st > 0 else 999
         except (ValueError, TypeError):
-            values["stock"] = 0
+            values["stock"] = 999
     if values.get("detail_info") and not values.get("description"):
         values["description"] = values["detail_info"]
     if values.get("description") and not values.get("detail_info"):
@@ -767,15 +858,19 @@ def _build_goods_update_values(existing, goods_dict: dict, *, partial: bool) -> 
 
     if "quantity" in values:
         try:
-            values["quantity"] = int(values["quantity"])
+            qty = int(values["quantity"])
+            # 列表 API 不返回库存：当远程库存为 0 时默认 999（与新增商品保持一致），
+            # 详情同步成功后会覆盖为真实值；避免本地库存为 0 导致 AI 客服误报"没库存"
+            values["quantity"] = qty if qty > 0 else 999
         except (ValueError, TypeError):
-            values.pop("quantity", None)
+            values["quantity"] = 999
 
     if "stock" in values:
         try:
-            values["stock"] = int(values["stock"])
+            st = int(values["stock"])
+            values["stock"] = st if st > 0 else 999
         except (ValueError, TypeError):
-            values.pop("stock", None)
+            values["stock"] = 999
 
     if "image_urls" in values:
         values["image_urls"] = _normalize_image_urls(values["image_urls"])
@@ -952,6 +1047,38 @@ async def sync_goods_for_account(
     """
     start_time = time.time()
 
+    # 一次性数据修复：把账号下所有库存为 0 或缺失的商品批量设为 999
+    # 闲鱼商品不会真正"0库存"（0库存会被自动下架），所有 stock<=0 的本地记录
+    # 都是同步链路历史遗留的脏数据。详情同步拿到真实库存后会覆盖为真实值。
+    try:
+        from ..core.database import async_session as _repair_session
+        from ..models.entities import XianyuGoods as _repair_model
+        from sqlalchemy import update as _repair_update, and_ as _repair_and, or_ as _repair_or
+        async with _repair_session() as repair_db:
+            repair_stmt = (
+                _repair_update(_repair_model)
+                .where(
+                    _repair_and(
+                        _repair_model.account_id == account_id,
+                        _repair_model.deleted == 0,
+                        _repair_or(
+                            _repair_model.quantity <= 0,
+                            _repair_model.quantity.is_(None),
+                            _repair_model.stock <= 0,
+                            _repair_model.stock.is_(None),
+                        ),
+                    )
+                )
+                .values(quantity=999, stock=999, updated_time=datetime.now())
+            )
+            repair_result = await repair_db.execute(repair_stmt)
+            repaired_count = repair_result.rowcount or 0
+            if repaired_count > 0:
+                await repair_db.commit()
+                logger.info("一次性库存修复: account_id=%d, 修复 %d 条 stock<=0 的商品为 999", account_id, repaired_count)
+    except Exception as repair_exc:
+        logger.warning("一次性库存修复失败: account_id=%d, errorType=%s", account_id, type(repair_exc).__name__)
+
     # 更新任务状态
     with _sync_lock:
         _prune_sync_tasks_locked()
@@ -1036,6 +1163,15 @@ async def sync_goods_for_account(
                             update_values.pop("quantity", None)
                         if "stock" in update_values and int(update_values["stock"]) <= 0:
                             update_values.pop("stock", None)
+                        # 列表 API 不返回库存：若本地库存仍为 0 或缺失（详情同步尚未完成或失败），
+                        # 设为 999（闲鱼常见库存值）兜底，避免 AI 客服误报"没库存"。
+                        # 详情同步成功后会覆盖为真实值；若本地已有真实库存（>0）则保留。
+                        local_qty = int(getattr(existing, "quantity", 0) or 0)
+                        local_st = int(getattr(existing, "stock", 0) or 0)
+                        if local_qty <= 0 and "quantity" not in update_values:
+                            update_values["quantity"] = 999
+                        if local_st <= 0 and "stock" not in update_values:
+                            update_values["stock"] = 999
                         stmt = (
                             update(XianyuGoods)
                             .where(XianyuGoods.id == existing.id)
@@ -1105,18 +1241,24 @@ async def sync_goods_for_account(
         sync_result = await _do_sync()
 
         # Step 5: 异步获取详情（如果有变化的商品）
+        # 修复：只要有任何商品（新增或更新）就触发详情同步
+        # 原逻辑仅 updated > 0 触发，导致首次同步全是新商品时（updated=0）跳过详情同步，
+        # 新商品库存永远为 0（列表 API 不返回库存字段）
         detail_synced = 0
-        if async_fetch_detail and sync_result.get("updated", 0) > 0:
-            logger.info("创建详情同步任务: account_id=%d, items_count=%d", account_id, len(all_items))
+        total_changed = sync_result.get("updated", 0) + sync_result.get("new", 0)
+        if async_fetch_detail and total_changed > 0:
+            logger.info("创建详情同步任务: account_id=%d, items_count=%d, updated=%d, new=%d",
+                        account_id, len(all_items), sync_result.get("updated", 0), sync_result.get("new", 0))
             task = asyncio.create_task(
                 _async_fetch_details(cookie_str, all_items, account_id, sync_id),
                 name="goods.detail-sync",
             )
             _detail_sync_tasks.add(task)
             task.add_done_callback(_detail_sync_done)
-            detail_synced = sync_result["updated"]
+            detail_synced = total_changed
         else:
-            logger.info("跳过详情同步: async_fetch_detail=%s, updated=%s", async_fetch_detail, sync_result.get("updated", 0))
+            logger.info("跳过详情同步: async_fetch_detail=%s, updated=%s, new=%s",
+                        async_fetch_detail, sync_result.get("updated", 0), sync_result.get("new", 0))
 
         duration = round(time.time() - start_time, 1)
 
@@ -1227,8 +1369,60 @@ async def _async_fetch_details(
                         if sku_sum > 0:
                             remote_quantity = sku_sum
 
-                # 有描述或库存任一可更新时才写库
-                if desc or remote_quantity > 0:
+                # 提取商品统计字段：浏览量、想要数
+                # 兼容多套字段命名与嵌套结构（itemDO.browseCnt / itemStats.viewCount / gpageInfo.pv）
+                stat_sources = [
+                    item_info,
+                    item_info.get("itemStats") if isinstance(item_info.get("itemStats"), dict) else {},
+                    item_info.get("gpageInfo") if isinstance(item_info.get("gpageInfo"), dict) else {},
+                    detail_data.get("gpageInfo") if isinstance(detail_data.get("gpageInfo"), dict) else {},
+                    detail_data.get("itemStats") if isinstance(detail_data.get("itemStats"), dict) else {},
+                ]
+                remote_view_count = 0
+                remote_want_count = 0
+                remote_exposure_count = 0
+                for src in stat_sources:
+                    if not src:
+                        continue
+                    if remote_view_count <= 0:
+                        for vk in ("browseCnt", "browseCount", "viewCount", "pv", "uv", "ipv"):
+                            v = src.get(vk)
+                            if v is None:
+                                continue
+                            try:
+                                v_int = int(v)
+                                if v_int > 0:
+                                    remote_view_count = v_int
+                                    break
+                            except (ValueError, TypeError):
+                                pass
+                    if remote_want_count <= 0:
+                        for wk in ("wantCnt", "wishCount", "wantCount", "favorCount", "want"):
+                            w = src.get(wk)
+                            if w is None:
+                                continue
+                            try:
+                                w_int = int(w)
+                                if w_int > 0:
+                                    remote_want_count = w_int
+                                    break
+                            except (ValueError, TypeError):
+                                pass
+                    if remote_exposure_count <= 0:
+                        for ek in ("exposureCount", "exposureNum", "exposure", "impression", "impressionCount"):
+                            e = src.get(ek)
+                            if e is None:
+                                continue
+                            try:
+                                e_int = int(e)
+                                if e_int > 0:
+                                    remote_exposure_count = e_int
+                                    break
+                            except (ValueError, TypeError):
+                                pass
+
+                # 有描述、库存或统计字段任一可更新时才写库
+                if desc or remote_quantity > 0 or remote_exposure_count > 0 or remote_view_count > 0 or remote_want_count > 0:
                     async with async_session() as db:
                         goods_result = await db.execute(
                             select(XianyuGoods).where(
@@ -1247,6 +1441,9 @@ async def _async_fetch_details(
                                 "description": str(desc) if desc else "",
                                 "quantity": remote_quantity if remote_quantity > 0 else None,
                                 "stock": remote_quantity if remote_quantity > 0 else None,
+                                "exposure_count": remote_exposure_count if remote_exposure_count > 0 else None,
+                                "view_count": remote_view_count if remote_view_count > 0 else None,
+                                "want_count": remote_want_count if remote_want_count > 0 else None,
                             }
                             _merge_detail_info(detail_goods_dict, detail_data)
                             update_values = _build_goods_update_values(existing, detail_goods_dict, partial=True)
@@ -1260,8 +1457,9 @@ async def _async_fetch_details(
 
                     detail_count += 1
                     logger.info(
-                        "详情同步: itemId=%s, quantity=%s (%d/%d)",
-                        item_id, remote_quantity or "-", detail_count, len(items)
+                        "详情同步: itemId=%s, quantity=%s, exposure=%d, view=%d, want=%d (%d/%d)",
+                        item_id, remote_quantity or "-", remote_exposure_count, remote_view_count, remote_want_count,
+                        detail_count, len(items)
                     )
 
             except RuntimeError as exc:
@@ -1478,9 +1676,6 @@ class XianyuItemOperator:
 
     # 擦亮 API（mtop.taobao.idle.item.polish 是闲鱼官方擦亮接口，已通过实测定可用）
     # 注：曾经存在的备用 API "mtop.idle.item.polish" 已被官方下线（返回 FAIL_SYS_API_NOT_FOUNDED），故移除
-    POLISH_API = "mtop.taobao.idle.item.polish"
-    POLISH_VERSION = "1.0"
-
     # 普通账号 API
     NORMAL_OFF_SHELF_API = "mtop.taobao.idle.item.downshelf"
     NORMAL_OFF_SHELF_VERSION = "2.0"
@@ -1580,29 +1775,12 @@ class XianyuItemOperator:
         # 检查响应
         ret = result.get("ret", [])
         ret_msg = ret[0] if isinstance(ret, list) and ret else str(ret)
-        is_polish = api_name == self.POLISH_API
+        is_polish = False  # polish feature removed; keep variable for minimal diff
         if RGV587 in str(ret_msg):
-            if is_polish:
-                raise ItemPolishVerificationRequired("platform verification required")
             raise RuntimeError("触发风控(RGV587)，请稍后再试")
         if TOKEN_EXPIRED in str(ret_msg) or TOKEN_EXPIRED_ALIAS in str(ret_msg) or SESSION_EXPIRED in str(ret_msg):
-            if is_polish:
-                raise ItemPolishAuthExpired("account auth expired")
             raise RuntimeError("登录已过期，请重新登录闲鱼账号")
         if not any("SUCCESS" in str(r) for r in ret):
-            if is_polish and any(marker in str(ret) for marker in POLISH_SOFT_SUCCESS_MARKERS):
-                raise ItemAlreadyPolished("item already polished today")
-            if is_polish:
-                ret_values = ret if isinstance(ret, list) else [ret]
-                ret_codes = {
-                    str(value).split("::", 1)[0].strip()
-                    for value in ret_values
-                }
-                if ret_codes and ret_codes.issubset(
-                    POLISH_RETRY_SAFE_REJECTION_CODES
-                ):
-                    raise ItemPolishRejected("platform explicitly rejected polish")
-                raise ItemPolishResultUnknown("platform polish result is ambiguous")
             raise RuntimeError("闲鱼平台暂未接受商品操作请求，请稍后重试")
 
         # 鱼小铺接口额外检查 data.data
@@ -1610,132 +1788,11 @@ class XianyuItemOperator:
             data_body = result.get("data", {})
             if isinstance(data_body, dict) and data_body.get("data") is False:
                 msg = data_body.get("msg", "未知错误")
-                if is_polish and any(marker in str(msg) for marker in POLISH_SOFT_SUCCESS_MARKERS):
-                    raise ItemAlreadyPolished("item already polished today")
-                if is_polish:
-                    nested_codes = {
-                        str(value).split("::", 1)[0].strip()
-                        for value in (
-                            data_body.get("code"),
-                            data_body.get("errorCode"),
-                            data_body.get("subCode"),
-                            msg,
-                        )
-                        if value
-                    }
-                    if nested_codes and nested_codes.issubset(
-                        POLISH_RETRY_SAFE_REJECTION_CODES
-                    ):
-                        raise ItemPolishRejected("platform explicitly rejected polish")
-                    raise ItemPolishResultUnknown(
-                        "platform nested polish result is ambiguous"
-                    )
                 raise RuntimeError(f"鱼小铺操作失败: {msg}")
 
         return result
 
-    def _call_polish_api(self, item_id: str) -> dict:
-        """
-        调用擦亮 API。
-        Args:
-            item_id: 闲鱼商品ID
-        Returns:
-            API 响应结果
-        """
-        data = {"itemId": item_id}
-        return self._call_api(self.POLISH_API, self.POLISH_VERSION, data)
 
-    def polish(self, item_id: str) -> dict:
-        """
-        擦亮商品（一键擦亮）。
-        返回包含 success、error、need_manual、already_done 等信息的字典。
-        - success=True 表示擦亮成功或商品已处于擦亮状态（视为成功）
-        - already_done=True 表示商品当天已擦亮过（FAIL_BIZ_IDLEITEM_POLISH_AGAIN）
-        - need_manual=True 表示触发风控，需要人工完成滑块验证
-        """
-        result = {
-            "success": False,
-            "error": None,
-            "error_code": None,
-            "need_manual": False,
-            "already_done": False,
-        }
-
-        def _needs_manual_retry(error_message: str) -> bool:
-            manual_markers = ("RGV587", "需要验证", "FAIL_SYS_USER_VALIDATE")
-            return any(marker in error_message for marker in manual_markers)
-
-        def _is_already_polished(error_message: str) -> bool:
-            return any(marker in error_message for marker in POLISH_SOFT_SUCCESS_MARKERS)
-
-        # 调用擦亮 API
-        try:
-            self._call_polish_api(item_id)
-            result["success"] = True
-            return result
-        except ItemPolishVerificationRequired:
-            result["error"] = "闲鱼要求完成安全验证，请在闲鱼 App 验证后重试"
-            result["error_code"] = "polish_verification_required"
-            result["need_manual"] = True
-            return result
-        except ItemAlreadyPolished:
-            result["success"] = True
-            result["already_done"] = True
-            return result
-        except ItemPolishAuthExpired:
-            result["error"] = "账号登录状态已过期，请重新登录"
-            result["error_code"] = "polish_account_auth_expired"
-            return result
-        except ItemPolishRejected:
-            result["error"] = "平台明确未完成擦亮，请检查账号与商品状态后重试"
-            result["error_code"] = "polish_platform_rejected"
-            return result
-        except ItemPolishResultUnknown:
-            raise
-        except RuntimeError as e:
-            error_msg = str(e)
-            # 1. 触发风控/滑块验证 → 暂停等待人工处理
-            if _needs_manual_retry(error_msg):
-                result["error"] = error_msg
-                result["error_code"] = "polish_verification_required"
-                result["need_manual"] = True
-                return result
-            # 2. "宝贝已经擦亮过了" → 视为成功（商品已处于擦亮状态）
-            if _is_already_polished(error_msg):
-                result["success"] = True
-                result["already_done"] = True
-                result["error"] = None
-                return result
-            # 3. 其他运行时错误无法证明平台未执行，交给持久任务标记 unknown。
-            raise ItemPolishResultUnknown("platform polish result is ambiguous") from e
-
-        return result
-
-    def polish_batch(self, item_ids: list[str]) -> dict[str, dict]:
-        """
-        批量擦亮商品。
-        返回 { item_id: {success, error, need_manual, already_done} } 字典。
-        """
-        results = {}
-        for item_id in item_ids:
-            try:
-                r = self.polish(item_id)
-                results[item_id] = r
-                logger.info(
-                    "擦亮结果: itemId=%s, success=%s, need_manual=%s, already_done=%s",
-                    item_id, r["success"], r["need_manual"], r.get("already_done", False)
-                )
-            except Exception as exc:
-                logger.error("擦亮异常 errorType=%s", type(exc).__name__)
-                results[item_id] = {
-                    "success": False,
-                    "error": "擦亮未完成，请稍后重试",
-                    "need_manual": False,
-                    "already_done": False,
-                }
-            # 商品间模拟人工延迟 1~3 秒，避免风控
-            time.sleep(random.uniform(1.0, 3.0))
-        return results
 
     def off_shelf(self, item_id: str) -> bool:
         """

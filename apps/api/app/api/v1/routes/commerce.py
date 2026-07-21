@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Body, Depends, Query
 from fastapi.responses import JSONResponse
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import Float, and_, cast, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ....core.database import get_db
@@ -859,6 +859,44 @@ async def delete_goods_remote(
     goods.updated_time = datetime.datetime.now()
     await db.commit()
     return ResultObject.success({"id": goods_id, "status": 3}, "商品已标记为远程删除")
+
+
+@router.get("/orders/today-amount", response_model=ResultObject)
+async def order_today_amount(
+    account_id: Optional[int] = Query(None, alias="accountId"),
+    db: AsyncSession = Depends(get_db),
+    _: dict = Depends(get_current_user),
+):
+    """查询今日订单金额。
+
+    按 pay_time 优先、create_time/created_time 兜底确定当日订单，
+    仅统计 order_status IN (1,2,3,4) 且 deleted=0 的订单 total_amount 之和。
+    accountId 为空时统计当前用户可见的全部账号。
+    """
+    today = datetime.date.today()
+    sum_expr = func.sum(cast(XianyuTradeOrder.total_amount, Float))
+    query = (
+        select(sum_expr)
+        .where(
+            XianyuTradeOrder.deleted == 0,
+            XianyuTradeOrder.order_status.in_([1, 2, 3, 4]),
+            or_(
+                func.date(XianyuTradeOrder.pay_time) == today,
+                and_(
+                    XianyuTradeOrder.pay_time.is_(None),
+                    or_(
+                        func.date(XianyuTradeOrder.create_time) == today,
+                        func.date(XianyuTradeOrder.created_time) == today,
+                    ),
+                ),
+            ),
+        )
+    )
+    if account_id is not None:
+        query = query.where(XianyuTradeOrder.account_id == account_id)
+    result = await db.execute(query)
+    amount = result.scalar() or 0
+    return ResultObject.success({"todayAmount": float(amount)})
 
 
 @router.get("/orders", response_model=ResultObject)

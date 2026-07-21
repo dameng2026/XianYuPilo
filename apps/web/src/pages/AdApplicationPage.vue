@@ -122,6 +122,17 @@
               </label>
 
               <label class="ads-field ads-field-full">
+                <span>公司或主体名称</span>
+                <input
+                  v-model="form.companyName"
+                  class="ads-input"
+                  :disabled="commercialState.available !== true"
+                  maxlength="200"
+                  placeholder="例如：XX 科技 / 个人主体姓名"
+                />
+              </label>
+
+              <label class="ads-field ads-field-full">
                 <span>跳转链接</span>
                 <input
                   v-model="form.landingUrl"
@@ -1316,6 +1327,7 @@ async function handleSubmit() {
     return
   }
   if (!form.planCode) return showNotice('请先选择广告套餐', 'warn')
+  if (!form.companyName.trim()) return showNotice('请先填写公司或主体名称', 'warn')
   if (!form.landingUrl.trim()) return showNotice('请先填写跳转链接', 'warn')
   if (!form.contact.trim()) return showNotice('请先填写联系人', 'warn')
   if (isTextMode.value && !form.title.trim()) return showNotice('请先填写广告标题', 'warn')

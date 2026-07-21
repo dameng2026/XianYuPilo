@@ -175,7 +175,14 @@ export function getAboutLogs(content = {}) {
     t: item?.t || buildDateText(),
     tone: item?.tone || (index === 0 ? 'major' : 'minor'),
     d: item?.d || '',
-    sections: Array.isArray(item?.sections) ? item.sections : [],
+    sections: Array.isArray(item?.sections) ? item.sections.map(section => ({
+      t: section?.t || '',
+      d: section?.d || '',
+      items: Array.isArray(section?.items) ? section.items.map(entry => ({
+        t: entry?.t || '',
+        d: entry?.d || '',
+      })) : [],
+    })) : [],
     tags: Array.isArray(item?.tags) ? item.tags : [],
   }))
 }

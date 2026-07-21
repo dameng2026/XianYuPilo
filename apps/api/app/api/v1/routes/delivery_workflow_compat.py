@@ -71,9 +71,9 @@ TEMPLATE_VARIABLES = [
 
 STATEMENT_DEFAULT_CONTENT = (
     "订单编号：{订单编号}\n\n"
-    "您好，该订单包含的商品为虚拟商品，发货后不支持退款。"
-    "如无异议，请点击下方链接确认发货。\n"
-    "{发货确认链接}"
+    "您好，该订单包含的商品为虚拟商品，发货后不支持退换。"
+    "如无异议，请回复【确认】。\n"
+    "如有异议，请回复【取消】，这边帮您转人工客服，进行退款操作"
 )
 
 
@@ -248,13 +248,39 @@ def _goods_record(row: dict[str, Any]) -> dict[str, Any]:
     return record
 
 
+def _normalize_source_delivery_mode(value: Any) -> str:
+    """Normalize delivery mode for delivery_text_source. Only 'text' and 'card' are allowed."""
+    mode = str(value or "text").strip().lower()
+    return "card" if mode in {"card", "kami"} else "text"
+
+
+def _build_source_stock_label(row: dict[str, Any], delivery_mode: str) -> str:
+    """Build a human-readable stock label for a source row, used in list/detail responses."""
+    if delivery_mode != "card":
+        return "文本"
+    remain = _to_int(row.get("card_remain_count") or row.get("cardRemainCount"))
+    group_name = row.get("card_group_name") or row.get("cardGroupName") or ""
+    return f"{group_name} · 剩余 {remain}" if group_name else f"剩余 {remain}"
+
+
 def _source_record(row: dict[str, Any], usage_count: int) -> dict[str, Any]:
+    delivery_mode = _normalize_source_delivery_mode(row.get("delivery_mode"))
+    card_group_id_raw = row.get("card_group_id")
+    try:
+        card_group_id: int | None = _to_int(card_group_id_raw) or None
+    except (TypeError, ValueError):
+        card_group_id = None
     return {
         "id": row["id"],
         "title": row.get("title") or "",
         "content": row.get("content") or "",
         "remark": row.get("remark") or "",
+        "deliveryMode": delivery_mode,
+        "cardGroupId": card_group_id,
+        "cardGroupName": row.get("card_group_name") or row.get("cardGroupName") or "",
+        "cardRemainCount": _to_int(row.get("card_remain_count") or row.get("cardRemainCount")),
         "usageCount": usage_count,
+        "stockLabel": _build_source_stock_label(row, delivery_mode),
         "createdTime": _format_datetime(row.get("created_time")),
         "updatedTime": _format_datetime(row.get("updated_time")),
     }
@@ -894,10 +920,15 @@ async def _load_delivery_source_row(
         await db.execute(
             text(
                 f"""
-                SELECT id, title, content, remark, created_time, updated_time
-                FROM delivery_text_source
-                WHERE id = :source_id
-                  AND deleted = 0
+                SELECT s.id, s.title, s.content, s.remark,
+                       s.source_type, s.delivery_mode, s.card_group_id,
+                       s.created_time, s.updated_time,
+                       g.group_name AS card_group_name,
+                       g.available_count AS card_remain_count
+                FROM delivery_text_source s
+                LEFT JOIN card_group g ON g.id = s.card_group_id AND g.deleted = 0
+                WHERE s.id = :source_id
+                  AND s.deleted = 0
                 LIMIT 1{lock_clause}
                 """
             ),
@@ -919,8 +950,12 @@ def _positive_source_id(value: Any) -> int:
     return source_id
 
 
-def _delivery_source_fields(body: dict[str, Any]) -> tuple[str, str, str]:
-    """Validate source fields before MySQL can turn user input into a 500."""
+def _delivery_source_fields(body: dict[str, Any]) -> dict[str, Any]:
+    """Validate source fields before MySQL can turn user input into a 500.
+
+    Returns a dict with title/content/remark/delivery_mode/card_group_id.
+    Card mode requires a card group id and the {卡密占位} placeholder in content.
+    """
 
     title = str(body.get("title") or "").strip()
     content = str(body.get("content") or "").strip()
@@ -933,7 +968,24 @@ def _delivery_source_fields(body: dict[str, Any]) -> tuple[str, str, str]:
         raise ValueError("货源正文 UTF-8 编码后不能超过 65535 字节")
     if not title and not content:
         raise ValueError("标题和正文至少填写一项")
-    return title, content, remark
+    delivery_mode = _normalize_source_delivery_mode(body.get("deliveryMode") or body.get("delivery_mode"))
+    card_group_id: int | None = None
+    if delivery_mode == "card":
+        try:
+            card_group_id = _to_int(body.get("cardGroupId") or body.get("card_group_id"))
+        except (TypeError, ValueError):
+            card_group_id = None
+        if not card_group_id:
+            raise ValueError("卡密发货模式下必须选择一个卡密分组")
+        if "{卡密占位}" not in content:
+            raise ValueError("卡密发货的正文必须包含 {卡密占位} 占位符，否则无法替换实际卡密")
+    return {
+        "title": title,
+        "content": content,
+        "remark": remark,
+        "delivery_mode": delivery_mode,
+        "card_group_id": card_group_id,
+    }
 
 
 async def _list_goods_rows(db: AsyncSession, goods_ids: list[int] | None = None) -> list[dict[str, Any]]:
@@ -2425,14 +2477,14 @@ async def get_delivery_sources(
     safe_size = min(max(size, 1), 200)
     offset = (safe_current - 1) * safe_size
     params: dict[str, Any] = {}
-    where_sql = ["deleted = 0"]
+    where_sql = ["s.deleted = 0"]
     if keyword.strip():
-        where_sql.append("(title LIKE :keyword OR content LIKE :keyword OR remark LIKE :keyword)")
+        where_sql.append("(s.title LIKE :keyword OR s.content LIKE :keyword OR s.remark LIKE :keyword)")
         params["keyword"] = f"%{keyword.strip()}%"
 
     total = (
         await db.execute(
-            text(f"SELECT COUNT(*) FROM delivery_text_source WHERE {' AND '.join(where_sql)}"),
+            text(f"SELECT COUNT(*) FROM delivery_text_source s WHERE {' AND '.join(where_sql)}"),
             params,
         )
     ).scalar() or 0
@@ -2441,10 +2493,15 @@ async def get_delivery_sources(
         await db.execute(
             text(
                 f"""
-                SELECT id, title, content, remark, created_time, updated_time
-                FROM delivery_text_source
+                SELECT s.id, s.title, s.content, s.remark,
+                       s.source_type, s.delivery_mode, s.card_group_id,
+                       s.created_time, s.updated_time,
+                       g.group_name AS card_group_name,
+                       g.available_count AS card_remain_count
+                FROM delivery_text_source s
+                LEFT JOIN card_group g ON g.id = s.card_group_id AND g.deleted = 0
                 WHERE {' AND '.join(where_sql)}
-                ORDER BY updated_time DESC, id DESC
+                ORDER BY s.updated_time DESC, s.id DESC
                 LIMIT :offset, :limit
                 """
             ),
@@ -2496,20 +2553,25 @@ async def create_delivery_source(
     _: dict = Depends(get_current_user),
 ):
     try:
-        title, content, remark = _delivery_source_fields(body)
+        fields = _delivery_source_fields(body)
     except ValueError as exc:
         return ResultObject.validate_failed(str(exc))
     await db.execute(
         text(
             """
-            INSERT INTO delivery_text_source(title, content, remark, deleted, created_time, updated_time)
-            VALUES(:title, :content, :remark, 0, NOW(), NOW())
+            INSERT INTO delivery_text_source(
+                title, content, remark, source_type, delivery_mode, card_group_id,
+                deleted, created_time, updated_time
+            )
+            VALUES(:title, :content, :remark, 'text', :delivery_mode, :card_group_id, 0, NOW(), NOW())
             """
         ),
         {
-            "title": title or content[:50] or "未命名货源",
-            "content": content or None,
-            "remark": remark or None,
+            "title": fields["title"] or fields["content"][:50] or "未命名货源",
+            "content": fields["content"] or None,
+            "remark": fields["remark"] or None,
+            "delivery_mode": fields["delivery_mode"],
+            "card_group_id": fields["card_group_id"],
         },
     )
     await db.commit()
@@ -2524,7 +2586,7 @@ async def update_delivery_source(
     _: dict = Depends(get_current_user),
 ):
     try:
-        title, content, remark = _delivery_source_fields(body)
+        fields = _delivery_source_fields(body)
     except ValueError as exc:
         return ResultObject.validate_failed(str(exc))
     existing = await _load_delivery_source_row(db, source_id, for_update=True)
@@ -2538,6 +2600,8 @@ async def update_delivery_source(
             SET title = :title,
                 content = :content,
                 remark = :remark,
+                delivery_mode = :delivery_mode,
+                card_group_id = :card_group_id,
                 updated_time = NOW()
             WHERE id = :source_id
               AND deleted = 0
@@ -2545,9 +2609,11 @@ async def update_delivery_source(
         ),
         {
             "source_id": source_id,
-            "title": title or content[:50] or "未命名货源",
-            "content": content or None,
-            "remark": remark or None,
+            "title": fields["title"] or fields["content"][:50] or "未命名货源",
+            "content": fields["content"] or None,
+            "remark": fields["remark"] or None,
+            "delivery_mode": fields["delivery_mode"],
+            "card_group_id": fields["card_group_id"],
         },
     )
     # MySQL commonly reports rowcount=0 for an idempotent update. Existence was
@@ -2865,18 +2931,28 @@ async def apply_delivery_source_to_goods(
         await db.rollback()
         return ResultObject.failed("货源不存在", code=404)
 
+    source_delivery_mode = _normalize_source_delivery_mode(source_row.get("delivery_mode"))
+    source_card_group_id: int | None = None
+    try:
+        source_card_group_id = _to_int(source_row.get("card_group_id")) or None
+    except (TypeError, ValueError):
+        source_card_group_id = None
     for goods_id in goods_ids:
         config = await _load_goods_config(db, goods_id)
         timing_config = dict(config.get(timing) or {})
         timing_config.update(
             {
                 "enabled": 1,
-                "mode": "text",
+                "mode": source_delivery_mode,
                 "sourceId": source_id,
                 "sourceTitle": source_row.get("title") or "",
                 "content": source_row.get("content") or "",
             }
         )
+        if source_delivery_mode == "card" and source_card_group_id:
+            timing_config["cardGroupId"] = source_card_group_id
+        else:
+            timing_config.pop("cardGroupId", None)
         config[timing] = timing_config
         await _upsert_goods_config(db, goods_id, config)
 
@@ -3082,7 +3158,7 @@ async def get_delivery_records(
                     COALESCE(g.cover_pic, g.image_url) AS goods_cover_pic,
                     COALESCE(o.pay_time, o.create_time, o.created_time) AS purchase_time,
                     acc.nickname AS seller_name,
-                    acc.display_name AS seller_display_name
+                    acc.nickname AS seller_display_name
                     {join_sql}
                 WHERE {' AND '.join(where_sql)}
                 ORDER BY dr.created_time DESC, dr.id DESC
@@ -3133,7 +3209,7 @@ async def get_delivery_record_detail(
                     COALESCE(g.cover_pic, g.image_url) AS goods_cover_pic,
                     COALESCE(o.pay_time, o.create_time, o.created_time) AS purchase_time,
                     acc.nickname AS seller_name,
-                    acc.display_name AS seller_display_name
+                    acc.nickname AS seller_display_name
                 FROM delivery_record dr
                 LEFT JOIN xianyu_trade_order o
                   ON o.id = dr.order_id
@@ -3167,29 +3243,196 @@ async def retry_delivery_record(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(get_current_user),
 ):
-    exists = (
+    """重试发货记录。
+
+    通过调用现有的 ManualDeliveryCoordinator 重新执行发货流程：
+    - 仅允许重试状态为 failed（status=3/6/7）或 pending 的记录
+    - 重置记录状态为 pending，调用 coordinator 执行
+    - 根据执行结果更新记录状态（success/failed/in_progress/unknown）
+    - text 模式：直接使用原 delivery_content 重新发送
+    - card 模式：暂不支持，引导使用手动发货闭环
+    """
+    # 1. 读取发货记录详情
+    record_row = (
         await db.execute(
             text(
                 """
-                SELECT id
-                FROM delivery_record
-                WHERE id = :record_id
-                  AND deleted = 0
+                SELECT dr.id, dr.order_id, dr.account_id, dr.delivery_mode,
+                       dr.delivery_timing, dr.status, dr.delivery_status,
+                       dr.content, dr.delivery_content, dr.quantity_requested,
+                       dr.error_message, dr.fail_reason,
+                       o.external_order_id, o.buyer_id, o.buyer_name,
+                       o.account_id AS order_account_id
+                FROM delivery_record dr
+                LEFT JOIN xianyu_trade_order o ON o.id = dr.order_id AND o.deleted = 0
+                WHERE dr.id = :record_id AND dr.deleted = 0
                 LIMIT 1
                 """
             ),
             {"record_id": record_id},
         )
-    ).scalar_one_or_none()
-    if exists is None:
+    ).mappings().first()
+    if record_row is None:
         raise HTTPException(status_code=404, detail="发货记录不存在")
-    raise HTTPException(
-        status_code=501,
-        detail=(
-            "当前版本没有安全的发货记录重试执行器，记录未被修改。"
-            "请先在闲鱼 App 核对买家消息与平台发货状态；确需再次操作时，"
-            "请前往订单管理使用手动发货闭环。结果未知或部分完成的记录禁止自动重试。"
+
+    current_status = _to_int(record_row.get("status"))
+    # 允许重试的状态：failed(3)、部分失败(6/7)、待处理(0/1/5)
+    # 不允许重试的状态：success(2)
+    if current_status == 2:
+        return ResultObject.failed(
+            "发货记录已完成，无需重试；如需再次发送，请前往订单管理使用手动发货",
+            code=409,
+        )
+
+    order_id = record_row.get("order_id")
+    if not order_id:
+        return ResultObject.failed("发货记录缺少订单关联，无法重试", code=422)
+
+    # 2. 准备发货内容
+    delivery_mode = str(record_row.get("delivery_mode") or "text").strip().lower()
+    delivery_content = (
+        record_row.get("delivery_content")
+        or record_row.get("content")
+        or ""
+    )
+    if delivery_mode not in ("text", "card", "kami"):
+        return ResultObject.failed(
+            f"不支持的发货模式：{delivery_mode}；仅支持 text/card 重试",
+            code=422,
+        )
+    if delivery_mode in ("card", "kami"):
+        # 卡密模式重试需要从商品发货配置中重新提取内容
+        # 这里通过 manual_delivery coordinator 的 card 认领流程处理
+        # 但 manual_delivery 期望 delivery_content 是最终发送文本，
+        # 卡密模式应由 coordinator 内部认领，因此先标空，由 coordinator 处理
+        return ResultObject.failed(
+            "卡密模式重试暂未支持；请前往订单管理使用手动发货闭环",
+            code=422,
+        )
+    if not delivery_content:
+        return ResultObject.failed("发货内容为空，无法重试", code=422)
+
+    # 3. 调用 ManualDeliveryCoordinator 执行重试
+    from ....services.manual_delivery import (
+        ManualDeliveryCommand,
+        ManualDeliveryCoordinator,
+        ManualDeliveryError,
+        SqlManualDeliveryAttemptStore,
+        XianyuManualDeliveryGateway,
+    )
+
+    coordinator = ManualDeliveryCoordinator(
+        store=SqlManualDeliveryAttemptStore(db),
+        gateway=XianyuManualDeliveryGateway(),
+    )
+    command = ManualDeliveryCommand(
+        delivery_mode="text",
+        delivery_content=delivery_content,
+        quantity_requested=_to_int(record_row.get("quantity_requested"), 1) or 1,
+        idempotency_key=None,  # 让 coordinator 内部生成
+    )
+
+    try:
+        # 重置记录状态为 pending
+        await db.execute(
+            text(
+                """
+                UPDATE delivery_record
+                SET status=0, delivery_status='pending',
+                    error_message=NULL, fail_reason=NULL,
+                    updated_time=NOW()
+                WHERE id=:record_id AND deleted=0
+                """
+            ),
+            {"record_id": record_id},
+        )
+        await db.commit()
+
+        outcome = await coordinator.execute(int(order_id), command)
+    except ManualDeliveryError as exc:
+        # 标记为失败
+        await db.execute(
+            text(
+                """
+                UPDATE delivery_record
+                SET status=3, delivery_status='failed',
+                    error_message=:err, fail_reason=:err,
+                    retry_count=COALESCE(retry_count, 0)+1,
+                    updated_time=NOW()
+                WHERE id=:record_id AND deleted=0
+                """
+            ),
+            {"record_id": record_id, "err": (exc.public_message or "重试失败")[:500]},
+        )
+        await db.commit()
+        return ResultObject.failed(
+            exc.public_message or "重试发货失败",
+            code=exc.http_status,
+        )
+    except Exception as exc:
+        logger.exception("retry_delivery_record unexpected error recordId=%s", record_id)
+        await db.execute(
+            text(
+                """
+                UPDATE delivery_record
+                SET status=3, delivery_status='failed',
+                    error_message=:err, fail_reason=:err,
+                    retry_count=COALESCE(retry_count, 0)+1,
+                    updated_time=NOW()
+                WHERE id=:record_id AND deleted=0
+                """
+            ),
+            {"record_id": record_id, "err": f"重试异常: {type(exc).__name__}"[:500]},
+        )
+        await db.commit()
+        return ResultObject.failed(
+            f"重试发货异常: {type(exc).__name__}",
+            code=503,
+        )
+
+    # 4. 根据 outcome 更新记录状态
+    status_map = {
+        "success": (2, "success"),
+        "message_sent": (5, "pending"),  # 已发送消息但未确认平台
+        "in_progress": (1, "pending"),
+        "pending": (1, "pending"),
+        "failed": (3, "failed"),
+        "unknown": (6, "unknown"),
+    }
+    new_status, new_delivery_status = status_map.get(outcome.status, (3, "failed"))
+    error_msg = outcome.error_code or "" if outcome.status != "success" else None
+
+    await db.execute(
+        text(
+            """
+            UPDATE delivery_record
+            SET status=:status, delivery_status=:delivery_status,
+                error_message=:err, fail_reason=:err,
+                completed_time=CASE WHEN :status=2 THEN NOW() ELSE completed_time END,
+                updated_time=NOW()
+            WHERE id=:record_id AND deleted=0
+            """
         ),
+        {
+            "record_id": record_id,
+            "status": new_status,
+            "delivery_status": new_delivery_status,
+            "err": error_msg,
+        },
+    )
+    await db.commit()
+
+    return ResultObject.success(
+        {
+            "recordId": record_id,
+            "orderId": int(order_id),
+            "status": outcome.status,
+            "deliveryStatus": new_delivery_status,
+            "message": outcome.message,
+            "attemptId": outcome.attempt_id,
+            "retrySafe": outcome.retry_safe,
+        },
+        outcome.message,
     )
 
 
@@ -3354,6 +3597,37 @@ async def scan_pending_orders(
             "scanned": scanned,
             "created": created,
             "message": f"扫描完成，本次新增 {created} 条待处理发货记录",
+        }
+    )
+
+
+@router.post("/auto-delivery/recover", response_model=ResultObject)
+async def trigger_delivery_recovery(
+    _: dict = Depends(get_current_user),
+):
+    """手动触发一次自动发货补发扫描。
+
+    复用 RealtimeDeliveryCoordinator 的幂等状态机，安全补发已开启自动发货
+    但因 WS 事件丢失、可重试错误等未发出的订单。worker 已每 10 分钟自动执行；
+    此接口用于立即验证或紧急补发。
+    """
+
+    from ....services.delivery_recovery import run_delivery_recovery_once
+
+    stats = await run_delivery_recovery_once()
+    return ResultObject.success(
+        {
+            "scanned": stats.get("scanned", 0),
+            "recovered": stats.get("recovered", 0),
+            "skipped": stats.get("skipped", 0),
+            "failed": stats.get("failed", 0),
+            "details": stats.get("details", []),
+            "message": (
+                f"补发扫描完成：扫描 {stats.get('scanned', 0)} 单，"
+                f"补发 {stats.get('recovered', 0)} 单，"
+                f"跳过 {stats.get('skipped', 0)} 单，"
+                f"失败 {stats.get('failed', 0)} 单"
+            ),
         }
     )
 

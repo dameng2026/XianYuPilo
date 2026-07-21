@@ -17,6 +17,19 @@ export function getOrderDetail(id, params) {
   })
 }
 
+/**
+ * 查询今日订单金额（仅统计 order_status IN (1,2,3,4) 且未删除订单的 total_amount 之和）。
+ * accountId 为空时统计当前用户全部账号。
+ * @param {number} [accountId]
+ */
+export function getTodayOrderAmount(accountId) {
+  return request({
+    url: '/orders/today-amount',
+    method: 'get',
+    params: { accountId: accountId || undefined }
+  })
+}
+
 export function updateOrder(id, data) {
   return request({
     url: `/orders/${id}`,

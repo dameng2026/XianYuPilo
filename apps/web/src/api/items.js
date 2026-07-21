@@ -1,7 +1,8 @@
 import request from '../utils/request.js'
 
 export const listItems = data => request.post('/item/list', data)
-export const refreshItems = data => request.post('/item/refresh', data)
+// 同步触发接口：后端创建后台任务后立即返回，但 DB 检查可能耗时，给 60s 超时
+export const refreshItems = data => request.post('/item/refresh', data, { timeout: 60000 })
 export const publishItem = data => request.post('/item/publish', data, { timeout: 180000 })
 export const itemDetail = data => request.post('/item/detail', data)
 export const offShelfItem = data => request.post('/item/offShelf', data, { timeout: 60000 })
@@ -9,13 +10,12 @@ export const remoteDeleteItem = data => request.post('/item/remoteDelete', data,
 export const batchDeleteItems = data => request.post('/item/batch/delete', data)
 export const updateItemPrice = data => request.post('/item/updatePrice', data, { timeout: 120000 })
 export const updateAutoReplyStatus = data => request.post('/item/updateAutoReplyStatus', data)
-export const getSyncProgress = syncId => request.get(`/item/syncProgress/${syncId}`)
+// 进度轮询：每 2s 调用一次，用较短超时避免阻塞下一次轮询
+export const getSyncProgress = syncId => request.get(`/item/syncProgress/${syncId}`, { timeout: 15000 })
 export const isSyncing = accountId => request.get(`/item/syncing/${accountId}`)
-export const runItemPolish = data => request.post('/item/polish', data, { suppressGlobalError: true })
-export const getItemPolishProgress = taskId => request.get(`/item/polishProgress/${encodeURIComponent(taskId)}`, { suppressGlobalError: true })
-export const reconcileItemPolish = data => request.post('/item/polish/reconcile', data, { suppressGlobalError: true })
 
-export const getSyncTasks = params => request.get('/item/syncTasks', { params })
+// 同步任务历史：直接查 DB，同步后可能数据量大，给 60s 超时
+export const getSyncTasks = params => request.get('/item/syncTasks', { params, timeout: 60000 })
 
 // ---- 自动分类相关 ----
 // 自动分类涉及图片下载+CDN上传+MTOP调用，设置较长超时（120s）

@@ -65,7 +65,6 @@ export function createDefaultRuntimeStatus() {
     commercialPaymentIdempotencyEnabled: false,
     commercialPaidAdPlacementEnforced: false,
     commercialFrontendUrl: '',
-    commercialAdminUrl: '',
     generalModelConfigured: false,
     embeddingModelConfigured: false,
   }

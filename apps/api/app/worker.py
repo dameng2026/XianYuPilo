@@ -24,6 +24,7 @@ from .core.database import async_session
 from .core.logging_security import install_log_redaction
 from .migrations import assert_schema_current
 from .services.audit_retention import run_audit_retention_once
+from .services.delivery_recovery import run_delivery_recovery_once
 from .services.scheduled_task_runtime import get_scheduled_task_runtime
 
 logger = logging.getLogger(__name__)
@@ -87,6 +88,49 @@ async def run_maintenance_once() -> dict[str, int | bool]:
             db,
             retention_days=settings.audit_log_retention_days,
         )
+
+
+async def run_delivery_recovery_forever(
+    interval_seconds: int | None = None,
+    *,
+    stop_event: asyncio.Event | None = None,
+) -> None:
+    """Poll pending auto-delivery orders and safely resend via the idempotent
+    realtime delivery state machine.
+
+    One order failure never terminates the loop. The interval defaults to
+    ``settings.delivery_recovery_interval_seconds`` (10 minutes) and is bound
+    to [60, 86400] seconds. Disabled via ``settings.delivery_recovery_enabled``.
+    """
+
+    if not settings.delivery_recovery_enabled:
+        logger.info("delivery_recovery disabled by config; loop not started")
+        return
+
+    interval = int(
+        interval_seconds
+        if interval_seconds is not None
+        else settings.delivery_recovery_interval_seconds
+    )
+    interval = max(60, min(interval, 86_400))
+    stop = stop_event or asyncio.Event()
+    logger.info(
+        "delivery_recovery loop started interval=%ss batch=%s minAge=%ss",
+        interval,
+        settings.delivery_recovery_batch_size,
+        settings.delivery_recovery_min_age_seconds,
+    )
+    while not stop.is_set():
+        try:
+            result = await run_delivery_recovery_once()
+            if result.get("scanned"):
+                logger.info("delivery_recovery batch: %s", result)
+        except Exception:
+            logger.error("delivery_recovery loop failed", exc_info=True)
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+        except TimeoutError:
+            continue
 
 
 async def _heartbeat_loop(
@@ -192,9 +236,16 @@ async def _serve() -> None:
         except (NotImplementedError, RuntimeError):
             # Windows development shells do not implement loop signal handlers.
             pass
+    # 补发货兜底循环与调度任务循环独立运行，单循环失败不影响另一个。
+    recovery_task = asyncio.create_task(
+        run_delivery_recovery_forever(stop_event=stop_event),
+        name="delivery-recovery-loop",
+    )
     try:
         await run_forever(stop_event=stop_event)
     finally:
+        stop_event.set()
+        await asyncio.gather(recovery_task, return_exceptions=True)
         from .core.database import engine
 
         await engine.dispose()

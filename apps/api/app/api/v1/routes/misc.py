@@ -1330,6 +1330,73 @@ async def websocket_send_message(
                 event,
                 seller_external_uid=prepared["seller_external_uid"],
             )
+
+            # 人工发送消息后触发会话级自动回复暂停（人工干预）：
+            # - auto_reply_paused=1：暂停 AI 自动回复
+            # - last_manual_reply_at：记录人工回复时间戳，用于 1 分钟自动恢复判断
+            # - auto_reply_manual_disabled：保持原值（用户已手动关闭则依然只能手动开启）
+            try:
+                normalized_sid = (
+                    str(prepared["ws_sid"] or "")
+                    .strip()
+                    .removeprefix("sid:")
+                    .removesuffix("@goofish")
+                )
+                if normalized_sid:
+                    conv_pause_row = (await db.execute(text("""
+                        SELECT id, auto_reply_manual_disabled
+                        FROM xianyu_conversation
+                        WHERE account_id = :account_id
+                          AND (
+                            REPLACE(REPLACE(COALESCE(peer_key, ''), 'sid:', ''), '@goofish', '') = :s_id
+                            OR REPLACE(REPLACE(COALESCE(external_buyer_id, ''), 'sid:', ''), '@goofish', '') = :s_id
+                          )
+                          AND deleted = 0
+                        ORDER BY last_message_time DESC, id DESC
+                        LIMIT 1
+                    """), {
+                        "account_id": account_id,
+                        "s_id": normalized_sid,
+                    })).mappings().first()
+                    if conv_pause_row:
+                        paused_conv_id = int(conv_pause_row["id"])
+                        await db.execute(text("""
+                            UPDATE xianyu_conversation
+                            SET auto_reply_paused = 1,
+                                last_manual_reply_at = :last_manual_at,
+                                updated_time = NOW()
+                            WHERE id = :conversation_id
+                        """), {
+                            "conversation_id": paused_conv_id,
+                            "last_manual_at": out_message_time,
+                        })
+                        logger.info(
+                            "人工发送消息触发会话级暂停 accountId=%d convId=%d",
+                            account_id, paused_conv_id,
+                        )
+                        # 广播状态变更通知前端实时更新
+                        try:
+                            await broadcaster.broadcast("conversation_auto_reply_state", {
+                                "conversationId": paused_conv_id,
+                                "accountId": account_id,
+                                "peerId": prepared["ws_to_id"],
+                                "sid": prepared["ws_sid"],
+                                "autoReplyPaused": 1,
+                                "autoReplyManualDisabled": int(conv_pause_row["auto_reply_manual_disabled"] or 0),
+                                "lastManualReplyAt": out_message_time,
+                                "reason": "manual_intervention",
+                            })
+                        except Exception:
+                            logger.warning(
+                                "广播会话暂停状态失败 accountId=%d convId=%d",
+                                account_id, paused_conv_id,
+                            )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "触发会话级暂停失败 accountId=%d errorType=%s",
+                    account_id, type(exc).__name__,
+                )
+
             event_holder.update(event)
             return local_message_id
 

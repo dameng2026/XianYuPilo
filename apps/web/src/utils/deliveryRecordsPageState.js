@@ -37,13 +37,28 @@ function deliveryStatusMeta(record) {
 }
 
 export function canRetryDeliveryRecord(record) {
-  void record
+  if (!record) return false
+  // 仅文本模式支持重试（卡密模式需重新认领卡密，暂不支持）
+  const mode = String(record?.deliveryMode || record?.delivery_mode || 'text').toLowerCase()
+  if (mode !== 'text') return false
+  // 必须有订单关联
+  const orderId = Number(record?.orderId ?? record?.order_id ?? 0)
+  if (!orderId) return false
+  // 已成功记录不可重试
+  const status = Number(record?.status ?? -1)
+  if (status === 2) return false
+  // 失败(3/6/7)、待处理(0/1/5) 可重试
+  if ([0, 1, 3, 5, 6, 7].includes(status)) return true
+  // 字符串状态兜底
+  const deliveryStatus = String(record?.deliveryStatus || '').toLowerCase()
+  if (['failed', 'pending', 'unknown'].includes(deliveryStatus)) return true
   return false
 }
 
 export function canScheduleRedelivery(record) {
-  void record
-  return false
+  const numericStatus = Number(record?.status)
+  const stringStatus = String(record?.deliveryStatus || '').toLowerCase()
+  return [3, 6, 7].includes(numericStatus) || ['failed', 'partial'].includes(stringStatus)
 }
 
 export function buildDeliveryRecordRowViewModel(record) {
@@ -78,5 +93,10 @@ export function buildDeliveryRecordDetailViewModel(record) {
     deliveryContentText: record?.deliveryContent || record?.content || '-',
     resultText: record?.result || record?.deliveryResult || '-',
     errorMessageText: record?.errorMessage || '-'
+  }
+}
+export function buildScheduleRedeliveryPayload(form) {
+  return {
+    cronExpression: String(form?.cronExpression || '').trim()
   }
 }

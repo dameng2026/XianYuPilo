@@ -78,7 +78,14 @@
                   <ul class="log-sections">
                     <li v-for="section in log.sections" :key="section.t">
                       <span class="log-section-title">{{ section.t }}</span>
-                      <span class="log-section-desc">{{ section.d }}</span>
+                      <div class="log-section-content">
+                        <p v-if="section.d" class="log-section-desc">{{ section.d }}</p>
+                        <ul v-if="section.items && section.items.length" class="log-section-items">
+                          <li v-for="(entry, entryIdx) in section.items" :key="entryIdx">
+                            <b v-if="entry.t" class="log-item-title">{{ entry.t }}</b><span v-if="entry.t" class="log-item-sep">：</span><span class="log-item-desc">{{ entry.d }}</span>
+                          </li>
+                        </ul>
+                      </div>
                     </li>
                   </ul>
                   <div class="log-tags">
@@ -525,7 +532,13 @@ function exportDiagnostics() {
   line-height: 1.6;
   white-space: nowrap;
 }
-.log-section-desc { flex: 1; min-width: 0; }
+.log-section-content { flex: 1; min-width: 0; }
+.log-section-desc { display: block; margin: 0; }
+.log-section-items { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.log-section-items li { font-size: 13px; line-height: 1.7; color: #3a4a63; }
+.log-item-title { color: #13213d; font-weight: 700; }
+.log-item-sep { color: #6b7a90; margin: 0 2px; }
+.log-item-desc { color: #4a5a73; }
 .log-tags { display: flex; gap: 6px; flex-wrap: wrap; }
 .log-tag {
   font-size: 10px;

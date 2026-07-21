@@ -4,7 +4,7 @@
       <div v-if="error" class="global-notice error">{{ error }}</div>
       <div v-if="success" class="global-notice success">{{ success }}</div>
       <div class="global-notice scheduler-info" role="status">
-        调度服务支持“同步商品”和“同步订单”。旧任务类型不会执行，可在列表中删除后重新创建。
+        调度服务支持"同步商品"和"同步订单"。旧任务类型不会执行，可在列表中删除后重新创建。
       </div>
 
       <CardPanel title="定时任务">
@@ -34,12 +34,30 @@
               <button
                 class="link"
                 type="button"
-                :disabled="!row.available || runningTaskId !== null"
-                :aria-disabled="!row.available || runningTaskId !== null"
+                :disabled="!row.available || runningTaskId !== null || togglingId === row.raw.id"
+                :aria-disabled="!row.available || runningTaskId !== null || togglingId === row.raw.id"
                 :title="row.available ? '编辑任务' : '旧任务类型不可编辑'"
                 @click.stop="edit(row.raw)"
               >
                 编辑
+              </button>
+              <button
+                v-if="row.available && (row.raw.enabled === 1 || row.raw.enabled === true)"
+                class="link"
+                type="button"
+                :disabled="runningTaskId !== null || togglingId === row.raw.id"
+                @click.stop="toggleEnabled(row.raw.id, 0)"
+              >
+                {{ togglingId === row.raw.id ? '处理中...' : '禁用' }}
+              </button>
+              <button
+                v-else-if="row.available"
+                class="link"
+                type="button"
+                :disabled="runningTaskId !== null || togglingId === row.raw.id"
+                @click.stop="toggleEnabled(row.raw.id, 1)"
+              >
+                {{ togglingId === row.raw.id ? '处理中...' : '启用' }}
               </button>
               <button
                 class="link"
@@ -66,28 +84,48 @@
           <input ref="taskNameInputRef" v-model="form.taskName" class="input" />
         </div>
         <div class="form-field">
-          <label>账号 ID</label>
-          <input v-model="form.accountId" class="input" inputmode="numeric" placeholder="必填，例如 8" />
+          <label>账号</label>
+          <div v-if="accountsLoading" class="hint">账号加载中...</div>
+          <select v-else v-model="form.accountId" class="input" :disabled="accounts.length === 0">
+            <option value="">请选择账号</option>
+            <option v-for="account in accounts" :key="account.id" :value="String(account.id)">
+              {{ accountLabel(account) }}
+            </option>
+          </select>
           <span v-if="accountError" class="input-error">{{ accountError }}</span>
         </div>
         <div class="form-field">
           <label>任务类型</label>
-          <select v-model="form.taskType" class="input">
+          <select v-model="form.taskType" class="input" @change="onTaskTypeChange">
             <option v-for="option in taskTypeOptions" :key="option.value" :value="option.value">
               {{ option.label }}
             </option>
           </select>
         </div>
+
+        <!-- 每日运行时间：自动生成 cron 表达式 -->
         <div class="form-field">
-          <label>Cron 表达式</label>
-          <input v-model="form.cronExpression" class="input" placeholder="*/30 * * * *" />
-          <span v-if="cronError" class="input-error">{{ cronError }}</span>
+          <label>每日运行时间</label>
+          <input v-model="form.dailyTime" type="time" class="input" @input="onDailyTimeChange" />
+          <span class="hint">填写后将自动生成 Cron 表达式，可在高级模式中覆盖。</span>
         </div>
-        <div class="form-field">
-          <label>配置 JSON</label>
-          <textarea v-model="form.configJson" class="textarea" rows="8"></textarea>
-          <span v-if="jsonError" class="input-error">{{ jsonError }}</span>
-        </div>
+
+        <!-- 高级模式：手动 cron + configJson -->
+        <details class="advanced-toggle">
+          <summary>高级模式（手动 Cron / 配置 JSON）</summary>
+          <div class="form-field">
+            <label>Cron 表达式</label>
+            <input v-model="form.cronExpression" class="input" placeholder="0 0 8 * * ?" />
+            <span class="hint">默认由"每日运行时间"自动生成；如需更复杂调度可手动覆盖。</span>
+            <span v-if="cronError" class="input-error">{{ cronError }}</span>
+          </div>
+          <div class="form-field">
+            <label>配置 JSON</label>
+            <textarea v-model="form.configJson" class="textarea" rows="6"></textarea>
+            <span v-if="jsonError" class="input-error">{{ jsonError }}</span>
+          </div>
+        </details>
+
         <label class="toggle-row">
           <input v-model="form.enabled" type="checkbox" />
           <span>启用自动调度</span>
@@ -118,10 +156,15 @@ import {
   deleteScheduledTask,
   getScheduledTasks,
   runScheduledTask,
+  setScheduledTaskEnabled,
   updateScheduledTask
 } from '../api/scheduledTasks.js'
+import { getLiteAccounts } from '../api/accounts.js'
 import {
   DEFAULT_SCHEDULED_TASK_TYPES,
+  buildCronExpression,
+  cronToDailyTime,
+  hydrateFormFromTask,
   normalizeScheduledTaskPayload,
   normalizeScheduledTaskTypes,
   resolveScheduledTaskHeaderAction,
@@ -139,15 +182,20 @@ const cronError = ref('')
 const jsonError = ref('')
 const accountError = ref('')
 const runningTaskId = ref(null)
+const togglingId = ref(null)
 const tasksAvailable = ref(null)
 const taskNameInputRef = ref(null)
+
+const accounts = ref([])
+const accountsLoading = ref(false)
 
 const form = reactive({
   id: null,
   taskName: '',
   accountId: '',
   taskType: 'sync_goods',
-  cronExpression: '*/30 * * * *',
+  dailyTime: '00:00',
+  cronExpression: '0 0 0 * * ?',
   configJson: '{}',
   enabled: false
 })
@@ -156,9 +204,8 @@ const taskTypeOptions = normalizeScheduledTaskTypes(DEFAULT_SCHEDULED_TASK_TYPES
 
 const columns = [
   { key: 'taskName', title: '任务名称' },
-  { key: 'accountId', title: '账号 ID' },
+  { key: 'accountId', title: '账号' },
   { key: 'taskType', title: '任务类型' },
-  { key: 'cronExpression', title: 'Cron' },
   { key: 'enabled', title: '启用状态' },
   { key: 'lastStatus', title: '最近结果' },
   { key: 'lastRunTimeText', title: '上次运行' },
@@ -174,8 +221,8 @@ const rows = computed(() => tasks.value.map(task => {
     accountId: task.accountId ?? '-',
     taskTypeLabel: taskTypeLabel(task.taskType),
     available,
-    enabledText: available ? enabled ? '已启用' : '已禁用' : '类型不可用',
-    enabledBadge: available ? enabled ? 'green' : 'gray' : 'red',
+    enabledText: available ? (enabled ? '已启用' : '已禁用') : '类型不可用',
+    enabledBadge: available ? (enabled ? 'green' : 'gray') : 'red',
     lastStatusText: statusText(task.lastStatus),
     lastStatusBadge: statusBadge(task.lastStatus),
     lastResultText: resultText(task.lastResult),
@@ -221,12 +268,29 @@ function reset() {
   form.taskName = ''
   form.accountId = ''
   form.taskType = 'sync_goods'
-  form.cronExpression = '*/30 * * * *'
+  form.dailyTime = '00:00'
+  form.cronExpression = '0 0 0 * * ?'
   form.configJson = '{}'
   form.enabled = false
   cronError.value = ''
   jsonError.value = ''
   accountError.value = ''
+}
+
+function onTaskTypeChange() {
+  // 任务类型不影响每日时间字段；保留以兼容商业版调用约定
+}
+
+function onDailyTimeChange() {
+  // 同步每日时间到 cron 表达式
+  form.cronExpression = buildCronExpression(form.taskType, { dailyTime: form.dailyTime })
+}
+
+function accountLabel(account) {
+  const remark = account.remark || account.accountNote || ''
+  const nickname = account.nickname || account.displayName || ''
+  const label = remark || nickname || account.externalUid || `账号 ${account.id}`
+  return `${label}（#${account.id}）`
 }
 
 function validateCron(cron) {
@@ -248,6 +312,19 @@ function validateJson(json) {
   }
 }
 
+async function loadAccounts() {
+  accountsLoading.value = true
+  try {
+    const res = await getLiteAccounts({ current: 1, size: 100 })
+    const list = recordsOf(res?.data)
+    accounts.value = camelizeKeys(list)
+  } catch (err) {
+    accounts.value = []
+  } finally {
+    accountsLoading.value = false
+  }
+}
+
 async function load(preserveNotice = false) {
   if (!preserveNotice) clearNotice()
   try {
@@ -264,13 +341,8 @@ async function load(preserveNotice = false) {
 }
 
 function edit(task) {
-  form.id = task.id
-  form.taskName = task.taskName || ''
-  form.accountId = task.accountId == null ? '' : String(task.accountId)
-  form.taskType = task.taskType || 'sync_goods'
-  form.cronExpression = task.cronExpression || '*/30 * * * *'
-  form.configJson = typeof task.configJson === 'string' ? task.configJson : JSON.stringify(task.configJson || {}, null, 2)
-  form.enabled = task.enabled === 1 || task.enabled === true
+  const hydrated = hydrateFormFromTask(task)
+  Object.assign(form, hydrated)
   cronError.value = ''
   jsonError.value = ''
   accountError.value = ''
@@ -280,10 +352,15 @@ async function save() {
   if (saving.value) return
   clearNotice()
 
+  // 若用户未手动覆盖 cron，使用每日时间生成
+  if (!form.cronExpression || form.cronExpression === '0 0 0 * * ?') {
+    form.cronExpression = buildCronExpression(form.taskType, { dailyTime: form.dailyTime })
+  }
+
   cronError.value = validateCron(form.cronExpression)
   jsonError.value = validateJson(form.configJson)
   const accountId = Number(String(form.accountId || '').trim())
-  accountError.value = Number.isSafeInteger(accountId) && accountId > 0 ? '' : '账号 ID 必须是正整数'
+  accountError.value = Number.isSafeInteger(accountId) && accountId > 0 ? '' : '请选择账号'
   if (cronError.value || jsonError.value || accountError.value) return
 
   saving.value = true
@@ -320,6 +397,22 @@ async function run(id) {
     await load(true)
   } finally {
     runningTaskId.value = null
+  }
+}
+
+async function toggleEnabled(id, newEnabled) {
+  if (togglingId.value !== null) return
+  clearNotice()
+  togglingId.value = id
+  try {
+    await setScheduledTaskEnabled(id, newEnabled)
+    success.value = `任务 #${id} 已${newEnabled ? '启用' : '禁用'}`
+    await load(true)
+  } catch (requestError) {
+    error.value = requestError.message || '切换任务状态失败'
+    await load(true)
+  } finally {
+    togglingId.value = null
   }
 }
 
@@ -374,6 +467,7 @@ function onHeaderAction(event) {
 onMounted(() => {
   window.addEventListener('xya-header-action', onHeaderAction)
   load()
+  loadAccounts()
 })
 
 onBeforeUnmount(() => {
@@ -445,6 +539,30 @@ onBeforeUnmount(() => {
   cursor: not-allowed;
   color: #98a2b3;
   text-decoration: none;
+}
+
+.advanced-toggle {
+  margin: 8px 0 12px;
+  padding: 8px 12px;
+  border: 1px solid #e3e8ef;
+  border-radius: 8px;
+  background: #f9fafb;
+}
+
+.advanced-toggle summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: #475467;
+  user-select: none;
+}
+
+.advanced-toggle[open] summary {
+  margin-bottom: 8px;
+}
+
+.hint {
+  color: #6b7280;
+  font-size: 12px;
 }
 
 @media (max-width: 1080px) {

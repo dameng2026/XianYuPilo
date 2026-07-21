@@ -8,14 +8,6 @@
       <div v-if="error" class="global-notice error">{{ error }}</div>
       <div v-if="accountListWarning" class="global-notice warning" role="status">{{ accountListWarning }}</div>
       <div v-if="qrSuccessMsg" class="global-notice success">{{ qrSuccessMsg }}</div>
-      <div v-if="polishNotice.text" :class="['global-notice', polishNotice.type]">{{ polishNotice.text }}</div>
-      <ItemPolishConflictCard
-        v-if="activePolishConflict"
-        :conflict="activePolishConflict"
-        :refreshing="activePolishConflictRefreshing"
-        :refresh-message="activePolishConflictRefreshMessage"
-        @refresh="refreshActivePolishConflict"
-      />
       <div class="grid stat-grid" style="grid-template-columns:repeat(5,1fr)">
         <StatCard title="账号总数" :value="accountMetric(stats.total)" change="全部记录" icon="users" />
         <StatCard title="正常账号" :value="accountMetric(stats.normal)" change="当前页" icon="account" color="green" />
@@ -51,16 +43,6 @@
             <button class="link" @click="selectAccount(row.raw)">详情</button>
             <button class="link" @click="refreshProfile(row.raw.id)">刷新资料</button>
             <button class="link" @click="openRescanModal(row.raw)">重新扫码</button>
-            <button
-              class="link"
-              type="button"
-              :disabled="isPolishBusy(row.raw)"
-              :aria-busy="isPolishActionLoading(row.raw)"
-              :title="itemPolishRetryGuidance(polishTaskFor(row.raw)) || polishTaskFor(row.raw)?.message || '对该账号当前所有在售商品执行真实闲鱼擦亮；结果未知时不会自动重试'"
-              @click="handleItemPolish(row.raw)"
-            >
-              {{ polishButtonText(row.raw) }}
-            </button>
             <button class="link" :disabled="isWsBusy(row.raw.id) || row.wsConnected == null || row.wsPending" @click="toggleWs(row.raw)">{{ isWsBusy(row.raw.id) ? '确认中...' : (row.wsPending ? '启动中' : (row.wsConnected === true ? '断开' : (row.wsConnected === false ? '连接' : '状态未知'))) }}</button>
             <button class="link danger-text" @click="removeAccount(row.raw.id)">删除</button>
           </template>
@@ -225,17 +207,6 @@
 
         <button
           type="button"
-          :disabled="isPolishBusy(selected)"
-          :aria-busy="isPolishActionLoading(selected)"
-          :title="itemPolishRetryGuidance(selectedPolishTask) || selectedPolishTask?.message || '对当前账号在售商品执行安全擦亮任务'"
-          @click="handleItemPolish(selected)"
-        >
-          <span>↥</span>
-          {{ polishButtonText(selected) }}
-        </button>
-
-        <button
-          type="button"
           @click="emit('navigate', 'auto-reply')"
         >
           <span>↻</span>
@@ -314,51 +285,6 @@
           批量设置
         </button>
 </div>
-      <div v-if="selectedPolishTask" class="polish-status-card" role="status">
-        <div class="polish-status-head">
-          <strong>商品擦亮任务</strong>
-          <Badge :type="polishBadgeType(selectedPolishTask.status)">{{ polishButtonText(selected) }}</Badge>
-        </div>
-        <p>{{ selectedPolishTask.message }}</p>
-        <small v-if="itemPolishRetryGuidance(selectedPolishTask)" class="polish-recovery warn">
-          {{ itemPolishRetryGuidance(selectedPolishTask) }}
-        </small>
-        <div class="polish-summary">
-          <span>进度 {{ selectedPolishTask.processed }}/{{ selectedPolishTask.total }}</span>
-          <span>已确认 {{ selectedPolishTask.polished }}</span>
-          <span>今日已擦亮 {{ selectedPolishTask.alreadyDone }}</span>
-          <span>明确失败 {{ selectedPolishTask.failed }}</span>
-          <span v-if="selectedPolishTask.unknown">未知 {{ selectedPolishTask.unknown }}</span>
-        </div>
-        <small v-if="selectedPolishPollMessage" class="polish-poll-message">{{ selectedPolishPollMessage }}</small>
-        <ul v-if="selectedPolishTask.results?.length" class="polish-results">
-          <li v-for="result in selectedPolishTask.results.slice(0, 8)" :key="result.goodsId">
-            <span>{{ result.title || `商品 #${result.goodsId}` }}</span>
-            <b :class="`result-${result.status}`">{{ itemPolishResultText(result.status) }}</b>
-          </li>
-        </ul>
-        <ItemPolishUnknownReconcile
-          :task="selectedPolishTask"
-          :busy-goods-id="selectedPolishReconcileBusyGoodsId"
-          :error-message="selectedPolishReconcileMessage"
-          @reconcile="reconcileItemPolishTask"
-        />
-        <button
-          v-if="itemPolishCanResume(selectedPolishTask) && !isPolishBusy(selected)"
-          type="button"
-          class="link"
-          :aria-busy="isPolishActionLoading(selected)"
-          @click="handleItemPolish(selected)"
-        >
-          {{ selectedPolishTask.status === 'needs_verification' ? '我已完成验证，继续原任务' : (['partial', 'failed'].includes(selectedPolishTask.status) ? '复用原任务处理明确未擦亮项' : '继续安全任务（复用原幂等键）') }}
-        </button>
-        <small v-else-if="selectedPolishTask.status === 'unknown'" class="polish-recovery warn">
-          请先在闲鱼 App 核对这些商品；系统不会自动重试未知结果。
-        </small>
-        <small v-else-if="selectedPolishTask.status === 'needs_verification'" class="polish-recovery warn">
-          请先在闲鱼 App 完成安全验证，再回到账号页手动继续；系统不会自动重试。
-        </small>
-      </div>
       <div class="retired-feature-note">
         <Icon name="help" />
         自动评价和消息等待配置已保存到账号级策略，后续运行时执行器将复用这些参数。闲鱼授权请使用扫码或 Cookie。
@@ -599,15 +525,11 @@
           <span>开启该账号的定时补发货</span>
         </label>
         <label class="auto-rate-toggle">
-          <input v-model="strategyForm.autoPolish" type="checkbox" :disabled="!strategyLoaded">
-          <span>开启该账号的自动擦亮商品</span>
-        </label>
-        <label class="auto-rate-toggle">
           <input v-model="strategyForm.requestRedFlower" type="checkbox" :disabled="!strategyLoaded">
           <span>开启该账号的求小红花（订单完成后主动请求买家评价）</span>
         </label>
         <div v-if="strategyError" class="input-error">{{ strategyError }}</div>
-        <div class="modal-hint"><Icon name="help" /> 该配置会作为账号级策略保存，后续消息等待、定时补发货、商品擦亮与求小红花会直接复用这里的参数。</div>
+        <div class="modal-hint"><Icon name="help" /> 该配置会作为账号级策略保存，后续消息等待、定时补发货与求小红花会直接复用这里的参数。</div>
         <div class="manual-actions">
           <AppButton @click="closeModal">取消</AppButton>
           <AppButton type="primary" :disabled="!strategyLoaded || strategySaving" @click="saveStrategyConfig">{{ strategySaving ? '保存中...' : '保存' }}</AppButton>
@@ -659,81 +581,12 @@
     </div>
   </Teleport>
 </template>
-<script>
-export function createItemPolishPageSingleFlight({ onPhaseChange = () => {} } = {}) {
-  const flights = new Map()
-
-  function notify(scopeKey, phase) {
-    onPhaseChange(scopeKey, phase)
-  }
-
-  function clear(scopeKey, expectedFlight) {
-    if (flights.get(scopeKey) !== expectedFlight) return
-    flights.delete(scopeKey)
-    notify(scopeKey, '')
-  }
-
-  function phaseFor(scopeKey) {
-    return flights.get(String(scopeKey || ''))?.phase || ''
-  }
-
-  function requestDefinitelyNotIssued(error) {
-    return error?.polishConflict
-      || error?.data?.requestIssued === false
-      || error?.data?.platformRequestIssued === false
-      || (error?.data?.status === 'failed' && error?.data?.retrySafe === true)
-  }
-
-  function run(rawScopeKey, { confirm, submit, taskAfterFailure = () => null } = {}) {
-    const scopeKey = String(rawScopeKey || '')
-    if (!scopeKey) return Promise.reject(new Error('item polish scope key is required'))
-    const active = flights.get(scopeKey)
-    if (active) return active.promise
-
-    const flight = { phase: 'confirming', promise: null }
-    flights.set(scopeKey, flight)
-    notify(scopeKey, flight.phase)
-    flight.promise = (async () => {
-      let requestIssued = false
-      try {
-        const confirmed = await confirm()
-        if (!confirmed) {
-          clear(scopeKey, flight)
-          return null
-        }
-        flight.phase = 'submitting'
-        notify(scopeKey, flight.phase)
-        requestIssued = true
-        const task = await submit()
-        clear(scopeKey, flight)
-        return task
-      } catch (error) {
-        const persistedTask = taskAfterFailure()
-        if (!requestIssued || requestDefinitelyNotIssued(error) || persistedTask) {
-          clear(scopeKey, flight)
-        } else {
-          flight.phase = 'unknown'
-          notify(scopeKey, flight.phase)
-        }
-        throw error
-      }
-    })()
-    return flight.promise
-  }
-
-  return { phaseFor, run }
-}
-</script>
-
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import StatCard from '../components/StatCard.vue'; import CardPanel from '../components/CardPanel.vue'; import BaseTable from '../components/BaseTable.vue'; import Badge from '../components/Badge.vue'; import AppButton from '../components/AppButton.vue'; import Icon from '../components/Icon.vue'; import Pagination from '../components/Pagination.vue'; import EmptyState from '../components/EmptyState.vue'
 import { checkAccountAuth, deleteAccount, getAccounts, createAccountByCookie, refreshAccountProfile, updateAccountCookie, getAccountAutoRateConfig, saveAccountAutoRateConfig, getAccountStrategyConfig, saveAccountStrategyConfig } from '../api/accounts.js'
 import { startWebSocket, stopWebSocket, websocketStatus } from '../api/websocket.js'
 import { useDebouncedRef } from '../composables/useDebouncedRef.js'
-import { useItemPolish } from '../composables/useItemPolish.js'
-import ItemPolishConflictCard from '../components/ItemPolishConflictCard.vue'
-import ItemPolishUnknownReconcile from '../components/ItemPolishUnknownReconcile.vue'
 const emit = defineEmits(['navigate'])
 import { generateQrLogin, getQrLoginStatus, cleanupQrLogin } from '../api/qrlogin.js'
 import { accountName } from '../utils/format.js'
@@ -741,15 +594,6 @@ import { accountAuthState, accountCookieBadgeType, accountCookieLabel, accountCo
 import { extractKeyFields, maskKeyFields, validateCookie, checkIdentity, maskValue } from '../utils/cookie.js'
 import { confirmAction } from '../utils/confirmAction.js'
 import { createLatestRequestGuard, listRefreshRequestConfig } from '../utils/latestRequest.js'
-import {
-  itemPolishBlocksRetry,
-  itemPolishCanStartNextBusinessDay,
-  itemPolishCanResume,
-  itemPolishResultText,
-  itemPolishRetryGuidance,
-  itemPolishScopeKey,
-  itemPolishStatusText,
-} from '../utils/itemPolishState.js'
 
 const modal = ref('')
 const manual = reactive({ accountNote:'', cookie:'' })
@@ -800,7 +644,7 @@ const autoRateForm = reactive({ enabled: false, rateType: 'text', textContent: '
 const strategySaving = ref(false)
 const strategyError = ref('')
 const strategyLoaded = ref(false)
-const strategyForm = reactive({ messageExpireTime: 3600, scheduledRedelivery: false, autoPolish: false, requestRedFlower: false })
+const strategyForm = reactive({ messageExpireTime: 3600, scheduledRedelivery: false, requestRedFlower: false })
 
 // 批量设置统一配置
 const unifiedConfigBusy = ref(false)
@@ -808,37 +652,6 @@ const unifiedConfigError = ref('')
 const unifiedConfigSuccess = ref('')
 const unifiedConfigTaskText = ref('')
 const pendingDeleteId = ref(null)     // 待删除的账号ID
-const polishNotice = reactive({ type: '', text: '' })
-const polishConflictAccountId = ref(null)
-const {
-  submit: submitItemPolish,
-  restore: restoreItemPolish,
-  taskFor: storedPolishTaskFor,
-  pollMessageFor: polishPollMessageFor,
-  conflictFor: polishConflictFor,
-  refreshConflict: refreshPolishConflict,
-  conflictRefreshingFor: polishConflictRefreshingFor,
-  conflictRefreshMessageFor: polishConflictRefreshMessageFor,
-  clearAllConflicts: clearAllPolishConflicts,
-  reconcile: reconcilePolishTask,
-  reconcilingGoodsIdFor: polishReconcilingGoodsIdFor,
-  reconcileMessageFor: polishReconcileMessageFor,
-} = useItemPolish()
-const selectedPolishTask = computed(() => selected.value?.id ? storedPolishTaskFor(selected.value.id) : null)
-const selectedPolishPollMessage = computed(() => selected.value?.id ? polishPollMessageFor(selected.value.id) : '')
-const activePolishConflict = computed(() => polishConflictAccountId.value ? polishConflictFor(polishConflictAccountId.value) : null)
-const activePolishConflictRefreshing = computed(() => polishConflictAccountId.value ? polishConflictRefreshingFor(polishConflictAccountId.value) : false)
-const activePolishConflictRefreshMessage = computed(() => polishConflictAccountId.value ? polishConflictRefreshMessageFor(polishConflictAccountId.value) : '')
-const selectedPolishReconcileBusyGoodsId = computed(() => selected.value?.id ? polishReconcilingGoodsIdFor(selected.value.id) : 0)
-const selectedPolishReconcileMessage = computed(() => selected.value?.id ? polishReconcileMessageFor(selected.value.id) : '')
-const POLISH_BUSY_TASK_STATUSES = new Set(['pending', 'running', 'unknown'])
-const polishFlightPhases = reactive({})
-const polishSingleFlight = createItemPolishPageSingleFlight({
-  onPhaseChange(scopeKey, phase) {
-    if (phase) polishFlightPhases[scopeKey] = phase
-    else delete polishFlightPhases[scopeKey]
-  },
-})
 
 // Cookie 编辑弹窗 - 实时解析预览
 const cookieEditParsed = computed(() => {
@@ -895,9 +708,6 @@ function isCurrentAccount(account) {
 }
 
 function closeDetail() {
-  clearAllPolishConflicts()
-  polishConflictAccountId.value = null
-  setPolishNotice('', '')
   selected.value = null
 }
 
@@ -917,170 +727,6 @@ function dispatchAccountAction(action) {
   }
 }
 
-function polishTaskFor(account) {
-  return account?.id ? storedPolishTaskFor(account.id) : null
-}
-
-function polishScopeKeyFor(account) {
-  return itemPolishScopeKey(account?.id)
-}
-
-function polishFlightPhaseFor(account) {
-  return polishFlightPhases[polishScopeKeyFor(account)] || ''
-}
-
-function isPolishReconciling(account) {
-  return Boolean(account?.id && polishReconcilingGoodsIdFor(account.id))
-}
-
-function isPolishBusy(account) {
-  const task = polishTaskFor(account)
-  return Boolean(
-    polishFlightPhaseFor(account)
-      || POLISH_BUSY_TASK_STATUSES.has(String(task?.status || ''))
-      || isPolishReconciling(account)
-      || itemPolishBlocksRetry(task)
-      || (account?.id && polishConflictFor(account.id)),
-  )
-}
-
-function isPolishActionLoading(account) {
-  return ['confirming', 'submitting'].includes(polishFlightPhaseFor(account)) || isPolishReconciling(account)
-}
-
-function polishButtonText(account) {
-  const phase = polishFlightPhaseFor(account)
-  if (phase === 'confirming') return '确认中...'
-  if (phase === 'submitting') return '提交中...'
-  if (phase === 'unknown') return '结果待核对'
-  if (isPolishReconciling(account)) return '核对结果中...'
-  const task = polishTaskFor(account)
-  if (task?.status === 'pending') {
-    return task.recovery === 'resume_task' ? '提交待确认' : '等待执行'
-  }
-  return task ? itemPolishStatusText(task) : '一键擦亮'
-}
-
-function polishBadgeType(status) {
-  return {
-    pending: 'orange',
-    running: 'blue',
-    completed: 'green',
-    partial: 'orange',
-    failed: 'red',
-    needs_verification: 'orange',
-    unknown: 'gray',
-  }[status] || 'gray'
-}
-
-function setPolishNotice(type, text) {
-  polishNotice.type = type
-  polishNotice.text = text
-}
-
-async function handleItemPolish(account) {
-  if (!account?.id || isPolishBusy(account)) return
-  if (Number(selected.value?.id || 0) !== Number(account.id)) selectAccount(account)
-  const requestedAccountId = Number(account.id)
-  if (Number(polishConflictAccountId.value || 0) !== requestedAccountId) {
-    clearAllPolishConflicts()
-    polishConflictAccountId.value = requestedAccountId
-    setPolishNotice('', '')
-  }
-  const existingConflict = polishConflictFor(requestedAccountId)
-  if (existingConflict) {
-    setPolishNotice(
-      'warn',
-      existingConflict.existingTask?.status === 'unknown'
-        ? '既有任务结果未知，当前继续禁止重试或重新提交；请只刷新冲突卡片并在闲鱼 App 核对。'
-        : '该账号仍有既有任务冲突；请使用冲突卡片只读刷新状态，不要重复提交。',
-    )
-    return
-  }
-  const authState = accountAuthState(account)
-  if (authState !== true) {
-    setPolishNotice(
-      authState === false ? 'error' : 'warn',
-      authState === false
-        ? '账号登录状态不可用，请先重新扫码或更新 Cookie，再执行擦亮。'
-        : '账号登录状态尚未确认，请先点击“登录验证”。',
-    )
-    return
-  }
-  const currentTask = polishTaskFor(account)
-  if (itemPolishBlocksRetry(currentTask)) {
-    const retryGuidance = itemPolishRetryGuidance(currentTask)
-    setPolishNotice(
-      'warn',
-      retryGuidance || (currentTask.status === 'unknown'
-        ? '上次平台结果未知，请先在闲鱼 App 核对逐项结果；系统不会自动或手动重复提交该未知任务。'
-        : '闲鱼要求完成安全验证。请先在闲鱼 App 验证，当前页面不会自动重试。'),
-    )
-    return
-  }
-  const isResume = itemPolishCanResume(currentTask)
-  const isVerificationResume = currentTask?.status === 'needs_verification'
-  const isNextBusinessDayTask = itemPolishCanStartNextBusinessDay(currentTask)
-  const confirmation = isNextBusinessDayTask
-    ? {
-        title: '新建次日擦亮任务？',
-        description: `${itemPolishRetryGuidance(currentTask)} 本次提交会创建新的任务和幂等键，绝不会复用昨日终态。`,
-        confirmText: '新建任务并擦亮',
-      }
-    : {
-        title: isVerificationResume ? '确认已完成闲鱼安全验证？' : (isResume ? '继续安全擦亮任务？' : '确认一键擦亮在售商品？'),
-        description: isVerificationResume
-          ? '仅当你已在闲鱼 App 完成安全验证时继续。系统会复用原任务、原范围和原幂等键，不会创建新意图。'
-          : isResume
-          ? '将复用原任务、原商品范围和原幂等键，只恢复明确可安全执行的项目；未知结果不会重试。'
-          : '服务端会先持久化任务和逐项意图，再调用闲鱼真实擦亮接口。请求超时或中断将标记为结果未知并停止自动重试。',
-        confirmText: isVerificationResume ? '我已完成验证，继续原任务' : (isResume ? '继续原任务' : '开始擦亮'),
-      }
-  try {
-    const task = await polishSingleFlight.run(polishScopeKeyFor(account), {
-      confirm: () => confirmAction(confirmation),
-      submit: () => submitItemPolish({
-        accountId: account.id,
-        forceNew: currentTask?.status === 'completed',
-      }),
-      taskAfterFailure: () => polishTaskFor(account),
-    })
-    if (!task) return
-    setPolishNotice(
-      task.status === 'completed' ? 'success' : 'info',
-      task.message,
-    )
-  } catch (requestError) {
-    const preserved = polishTaskFor(account)
-    const resultUnknown = polishFlightPhaseFor(account) === 'unknown'
-    setPolishNotice(
-      resultUnknown || requestError?.timeout || requestError?.code === 'NETWORK_ERROR' ? 'warn' : 'error',
-      resultUnknown
-        ? '擦亮请求是否已签发尚未确认，当前意图已锁定。请先在闲鱼 App 核对并刷新任务状态，系统不会重复提交。'
-        : requestError?.polishConflict?.message || preserved?.message || requestError?.message || '擦亮任务提交失败，请检查账号状态后重试。',
-    )
-  }
-}
-
-async function refreshActivePolishConflict() {
-  if (!polishConflictAccountId.value) return
-  await refreshPolishConflict(polishConflictAccountId.value)
-}
-
-async function reconcileItemPolishTask({ goodsId, outcome }) {
-  if (!selected.value?.id) return
-  try {
-    await reconcilePolishTask({ accountId: selected.value.id, goodsId, outcome })
-    setPolishNotice(
-      'success',
-      outcome === 'confirmed_not_polished'
-        ? '该商品已记录为今天未擦亮。为防迟到请求重复操作，本日不再自动重试，次日可新建任务。'
-        : '该商品的人工核对结论已记录，任务状态已更新。',
-    )
-  } catch {
-    setPolishNotice('error', '人工核对结论保存失败；原任务快照已保留，可在网络恢复后重试当前这一项。')
-  }
-}
 
 
 const accountDiagnostics = computed(() => {
@@ -1180,7 +826,7 @@ function strategyConfigOf(res) {
   if (!Number.isFinite(messageExpireTime) || messageExpireTime < 0 || messageExpireTime > 86400) {
     throw new Error('账号策略等待时间响应格式异常')
   }
-  if (typeof data.scheduledRedelivery !== 'boolean' || typeof data.autoPolish !== 'boolean') {
+  if (typeof data.scheduledRedelivery !== 'boolean') {
     throw new Error('账号策略开关响应格式异常')
   }
   return { ...data, messageExpireTime }
@@ -1248,14 +894,12 @@ async function openStrategyModal(account = selected.value) {
   strategyLoaded.value = false
   strategyForm.messageExpireTime = 3600
   strategyForm.scheduledRedelivery = false
-  strategyForm.autoPolish = false
   strategyForm.requestRedFlower = false
   try {
     const res = await getAccountStrategyConfig(account.id)
     const data = strategyConfigOf(res)
     strategyForm.messageExpireTime = data.messageExpireTime
     strategyForm.scheduledRedelivery = data.scheduledRedelivery
-    strategyForm.autoPolish = data.autoPolish
     strategyForm.requestRedFlower = data.requestRedFlower === true
     strategyLoaded.value = true
   } catch (e) {
@@ -1276,7 +920,6 @@ async function saveStrategyConfig() {
     const res = await saveAccountStrategyConfig(selected.value.id, {
       messageExpireTime: Math.round(messageExpireTime),
       scheduledRedelivery: strategyForm.scheduledRedelivery,
-      autoPolish: strategyForm.autoPolish,
       requestRedFlower: strategyForm.requestRedFlower,
     })
     strategyConfigOf(res)
@@ -1373,7 +1016,6 @@ async function applyCurrentStrategyToVisibleAccounts() {
     const payload = {
       messageExpireTime: source.messageExpireTime,
       scheduledRedelivery: source.scheduledRedelivery,
-      autoPolish: source.autoPolish,
       requestRedFlower: source.requestRedFlower === true,
     }
     let success = 0
@@ -1533,11 +1175,6 @@ function goPage(p) {
 }
 
 function selectAccount(account) {
-  if (Number(selected.value?.id || 0) !== Number(account?.id || 0)) {
-    clearAllPolishConflicts()
-    polishConflictAccountId.value = null
-    setPolishNotice('', '')
-  }
   selected.value = account
   selectedId.value = account.id
   loadWsStatus(account.id).catch(() => {})
@@ -1925,7 +1562,6 @@ onMounted(() => {
   window.addEventListener('xya-header-action', handleHeaderAction)
   window.addEventListener('xya-sse-event', handleSseEvent)
   loadAccounts()
-  void restoreItemPolish()
 })
 onBeforeUnmount(() => {
   accountsRequestGuard.invalidate()
@@ -1944,64 +1580,6 @@ onBeforeUnmount(() => {
   color: #526079;
   font-size: 13px;
 }
-
-.polish-status-card {
-  margin-top: 12px;
-  padding: 12px;
-  border: 1px solid #dbe8fb;
-  border-radius: 10px;
-  background: #f8fbff;
-}
-
-.polish-status-head,
-.polish-summary,
-.polish-results li {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.polish-status-card p,
-.polish-poll-message,
-.polish-recovery {
-  display: block;
-  margin: 8px 0;
-  color: #667085;
-  font-size: 12px;
-  line-height: 1.55;
-}
-
-.polish-summary {
-  flex-wrap: wrap;
-  justify-content: flex-start;
-  color: #475467;
-  font-size: 12px;
-}
-
-.polish-results {
-  margin: 8px 0;
-  padding: 8px 0 0;
-  border-top: 1px solid #e5edf8;
-  list-style: none;
-}
-
-.polish-results li {
-  padding: 4px 0;
-  font-size: 12px;
-}
-
-.polish-results li span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.result-confirmed,
-.result-already_done { color: #16803c; }
-.result-failed,
-.result-needs_verification { color: #b54708; }
-.result-unknown { color: #b42318; }
 
 .qr-unavailable {
   width: 100%;

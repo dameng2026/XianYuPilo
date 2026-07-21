@@ -64,14 +64,6 @@ async def lifespan(app: FastAPI):
             await ensure_instance_token(session)
     except Exception:
         logger.warning("Failed to load instance token on startup", exc_info=True)
-
-    # Recover committed item-polish work independently of browser state. The
-    # database lease decides which replica may execute each task.
-    try:
-        from app.services.item_polish import start_item_polish_recovery_worker
-        await start_item_polish_recovery_worker(async_session)
-    except Exception:
-        logger.warning("Item polish recovery worker start failed", exc_info=True)
     
     # 启动 WebSocket
     try:
@@ -91,11 +83,6 @@ async def lifespan(app: FastAPI):
 
     # 先拒绝新的辅助任务，再依次停止长期生产者；Redis/DB 最后关闭。
     begin_background_task_shutdown()
-    try:
-        from app.services.item_polish import stop_item_polish_recovery_worker
-        await stop_item_polish_recovery_worker()
-    except Exception:
-        logger.warning("Item polish recovery worker shutdown failed", exc_info=True)
     try:
         from app.services.cookie_token_refresher import stop_dispatcher
         await stop_dispatcher()

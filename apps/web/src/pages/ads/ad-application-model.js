@@ -2,6 +2,7 @@ export function createDefaultAdApplicationForm() {
   return {
     positionType: 'home_carousel',
     planCode: '',
+    companyName: '',
     title: '',
     landingUrl: '',
     contact: '',
@@ -57,6 +58,7 @@ export function buildAdApplicationPayload(form, idempotencyKey = '') {
   const payload = {
     positionType: String(form?.positionType || 'home_carousel').trim(),
     planCode: String(form?.planCode || '').trim(),
+    companyName: String(form?.companyName || '').trim(),
     title: String(form?.title || '').trim(),
     landingUrl: String(form?.landingUrl || '').trim(),
     contact: String(form?.contact || '').trim(),

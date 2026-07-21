@@ -75,6 +75,14 @@ class Settings(BaseSettings):
     scheduler_lease_seconds: int = 360
     scheduler_batch_size: int = 20
 
+    # 自动发货补发兜底循环：扫描已开启自动发货但未发出的订单，
+    # 复用 RealtimeDeliveryCoordinator 的幂等状态机安全补发。
+    delivery_recovery_enabled: bool = True
+    delivery_recovery_interval_seconds: int = 600  # 10 分钟
+    delivery_recovery_batch_size: int = 50
+    # 订单付款后至少等待该秒数才允许补发，避免与 WS 实时事件抢资源。
+    delivery_recovery_min_age_seconds: int = 300
+
     # 内部调用令牌。Phase 1 起内部接口 fail-closed：为空时拒绝内部调用。
     internal_api_token: str = Field(
         default="dev-only-internal-api-token-change-me-32-chars",
@@ -313,6 +321,16 @@ class Settings(BaseSettings):
             )
         if not 1 <= self.scheduler_batch_size <= 100:
             raise ValueError("SCHEDULER_BATCH_SIZE must be between 1 and 100")
+        if not 60 <= self.delivery_recovery_interval_seconds <= 86_400:
+            raise ValueError(
+                "DELIVERY_RECOVERY_INTERVAL_SECONDS must be between 60 and 86400"
+            )
+        if not 1 <= self.delivery_recovery_batch_size <= 200:
+            raise ValueError("DELIVERY_RECOVERY_BATCH_SIZE must be between 1 and 200")
+        if not 0 <= self.delivery_recovery_min_age_seconds <= 86_400:
+            raise ValueError(
+                "DELIVERY_RECOVERY_MIN_AGE_SECONDS must be between 0 and 86400"
+            )
         if not 1 <= self.audit_log_retention_days <= 3650:
             raise ValueError("AUDIT_LOG_RETENTION_DAYS must be between 1 and 3650")
 

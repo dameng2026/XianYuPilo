@@ -79,6 +79,10 @@ export function getDeliveryRecordDetail(id) {
   return request({ url: `/auto-delivery/records/${id}`, method: 'get' })
 }
 
+export function retryDeliveryRecord(id) {
+  return request({ url: `/auto-delivery/records/${id}/retry`, method: 'post' })
+}
+
 export function scheduleRedelivery(id, data) {
   return request({ url: `/auto-delivery/records/${id}/schedule-redelivery`, method: 'post', data })
 }
@@ -95,6 +99,11 @@ export function triggerDelivery(orderId, timing) {
 
 export function scanPendingOrders() {
   return request({ url: '/auto-delivery/scan', method: 'post' })
+}
+
+// 立即触发一次自动发货补发扫描（worker 已每 10 分钟自动执行）
+export function recoverPendingDeliveries() {
+  return request({ url: '/auto-delivery/recover', method: 'post' })
 }
 
 // 文本货源库

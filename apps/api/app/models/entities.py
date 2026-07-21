@@ -289,6 +289,15 @@ class XianyuConversation(Base):
     last_message_time = Column(DateTime, nullable=True)
     last_message_content = Column(Text, nullable=True)
     unread_count = Column(Integer, default=0)
+    # 会话级自动回复状态机（同步商业版 V1.13）
+    # auto_reply_paused: 0=运行中 1=已暂停（人工干预或手动关闭触发）
+    # auto_reply_manual_disabled: 0=可自动恢复 1=手动关闭（禁止自动恢复，仅用户手动开启）
+    # last_manual_reply_at: 最后人工回复时间戳（毫秒），用于1分钟自动恢复判断
+    # last_auto_reply_at: 最后 AI 自动回复时间戳（毫秒）
+    auto_reply_paused = Column(SmallInteger, default=0, comment="会话级自动回复是否暂停 0否 1是（人工干预或手动关闭触发）")
+    auto_reply_manual_disabled = Column(SmallInteger, default=0, comment="是否被用户手动关闭 0否 1是（1时不允许自动恢复，仅手动开启）")
+    last_manual_reply_at = Column(BigInteger, nullable=True, comment="最后一次人工回复时间戳（毫秒），用于1分钟自动恢复判断")
+    last_auto_reply_at = Column(BigInteger, nullable=True, comment="最后一次 AI 自动回复时间戳（毫秒）")
     created_time = Column(DateTime, default=func.now())
     updated_time = Column(DateTime, default=func.now(), onupdate=func.now())
 
@@ -848,73 +857,6 @@ class GoodsOffShelfAttempt(Base):
     created_time = Column(DateTime, default=func.now())
     updated_time = Column(DateTime, default=func.now(), onupdate=func.now())
 
-
-class ItemPolishTask(Base):
-    """Durable account/item-scope task for real platform polishing."""
-
-    __tablename__ = "item_polish_task"
-    __table_args__ = (
-        UniqueConstraint("task_id", name="uk_item_polish_task_id"),
-        UniqueConstraint("idempotency_key", name="uk_item_polish_task_key"),
-        Index("idx_item_polish_account_created", "account_id", "created_time"),
-        Index("idx_item_polish_state_lease", "status", "lease_until"),
-    )
-
-    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
-    task_id = Column(String(64), nullable=False)
-    account_id = Column(BigInteger, nullable=False)
-    idempotency_key = Column(String(128), nullable=False)
-    request_digest = Column(String(64), nullable=False)
-    status = Column(String(32), nullable=False, default="pending")
-    retry_safe = Column(SmallInteger, nullable=False, default=1)
-    total_count = Column(Integer, nullable=False, default=0)
-    processed_count = Column(Integer, nullable=False, default=0)
-    polished_count = Column(Integer, nullable=False, default=0)
-    already_done_count = Column(Integer, nullable=False, default=0)
-    failed_count = Column(Integer, nullable=False, default=0)
-    unknown_count = Column(Integer, nullable=False, default=0)
-    lease_token = Column(String(64), nullable=True)
-    lease_until = Column(DateTime, nullable=True)
-    last_error_code = Column(String(64), nullable=True)
-    error_message = Column(String(500), nullable=True)
-    started_time = Column(DateTime, nullable=True)
-    finished_time = Column(DateTime, nullable=True)
-    created_time = Column(DateTime, default=func.now())
-    updated_time = Column(DateTime, default=func.now(), onupdate=func.now())
-
-
-class ItemPolishTaskItem(Base):
-    """Per-product durable outcome inside an item-polish task."""
-
-    __tablename__ = "item_polish_task_item"
-    __table_args__ = (
-        UniqueConstraint("task_db_id", "goods_id", name="uk_item_polish_task_goods"),
-        Index("idx_item_polish_item_state", "task_db_id", "status", "id"),
-        Index(
-            "idx_item_polish_item_daily_confirmation",
-            "account_id",
-            "external_goods_id",
-            "status",
-            "remote_confirmed_at",
-        ),
-    )
-
-    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
-    task_db_id = Column(BigInteger, nullable=False)
-    goods_id = Column(BigInteger, nullable=False)
-    account_id = Column(BigInteger, nullable=False)
-    external_goods_id = Column(String(200), nullable=False)
-    title_snapshot = Column(String(500), nullable=True)
-    status = Column(String(32), nullable=False, default="pending")
-    retry_safe = Column(SmallInteger, nullable=False, default=1)
-    attempt_count = Column(Integer, nullable=False, default=0)
-    lease_token = Column(String(64), nullable=True)
-    remote_started_at = Column(DateTime, nullable=True)
-    remote_confirmed_at = Column(DateTime, nullable=True)
-    last_error_code = Column(String(64), nullable=True)
-    error_message = Column(String(500), nullable=True)
-    created_time = Column(DateTime, default=func.now())
-    updated_time = Column(DateTime, default=func.now(), onupdate=func.now())
 
 
 class ExternalOperationAttempt(Base):

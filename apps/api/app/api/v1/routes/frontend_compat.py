@@ -199,6 +199,10 @@ def _validated_ad_application_payload(payload: Any) -> dict[str, Any]:
     if not AD_IDEMPOTENCY_KEY_PATTERN.fullmatch(idempotency_key):
         raise ValueError("申请意图幂等键缺失或不合法")
 
+    company_name = _bounded_text(source.get("companyName"), "公司或主体名称", 200)
+    if not company_name:
+        raise ValueError("公司或主体名称不能为空")
+
     contact_name = _bounded_text(source.get("contactName"), "联系人", 200)
     contact_phone = _bounded_text(source.get("contactPhone"), "联系电话", 50)
     contact_wechat = _bounded_text(source.get("contactWechat"), "联系微信", 100)
@@ -223,7 +227,7 @@ def _validated_ad_application_payload(payload: Any) -> dict[str, Any]:
     return {
         "positionType": position_type,
         "planCode": plan_code,
-        "companyName": _bounded_text(source.get("companyName"), "公司名称", 200),
+        "companyName": company_name,
         "contact": contact,
         "contactName": contact_name,
         "contactPhone": contact_phone,
@@ -2196,6 +2200,42 @@ async def delete_scheduled_task(
         _raise_scheduled_task_http_error(exc)
     return ResultObject.success({"success": True}, "定时任务已删除")
 
+
+@router.patch("/scheduled-tasks/{task_id}/enabled")
+async def set_scheduled_task_enabled(
+    task_id: int,
+    payload: dict,
+    runtime: ScheduledTaskRuntime = Depends(get_scheduled_task_runtime),
+    current_user: dict = Depends(get_current_user),
+):
+    """切换定时任务的启用状态。
+
+    请求体形如 ``{"enabled": 1}`` 或 ``{"enabled": true}``，
+    与商业版前端 ``setScheduledTaskEnabled`` 调用约定一致。
+    """
+
+    del current_user
+    raw = payload.get("enabled") if isinstance(payload, dict) else None
+    if raw is None:
+        raise HTTPException(status_code=400, detail="enabled 字段必填")
+    if isinstance(raw, bool):
+        enabled = raw
+    else:
+        normalized = str(raw).strip().lower()
+        if normalized in {"1", "true"}:
+            enabled = True
+        elif normalized in {"0", "false"}:
+            enabled = False
+        else:
+            raise HTTPException(status_code=400, detail="enabled 仅支持 true/false 或 1/0")
+    try:
+        record = await runtime.set_enabled(task_id, enabled=enabled)
+    except ScheduledTaskError as exc:
+        _raise_scheduled_task_http_error(exc)
+    return ResultObject.success({
+        "id": record.id,
+        "enabled": 1 if record.enabled else 0,
+    }, "定时任务状态已更新")
 
 @router.post("/scheduled-tasks/{task_id}/run")
 async def run_scheduled_task(

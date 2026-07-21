@@ -83,7 +83,7 @@
 
       <CardPanel
         title="商业版桥接状态"
-        desc="开源版通过商业版后端拉取轮播图、文字广告与广告套餐，并提交广告投放申请。桥接令牌、URL 等敏感信息仅在服务端配置，浏览器不可见。"
+        desc="开源版通过商业版后端拉取轮播图、文字广告与广告套餐，并提交广告投放申请。桥接令牌、商业版后台地址等敏感信息仅在服务端配置，前端不展示，部署方也无法在浏览器侧修改。商业版前台地址仅用于展示引流。"
       >
         <div v-if="!runtimeStatusAvailable" class="bridge-notice">
           运行状态暂不可用，无法确认商业版桥接状态。点击上方「重新加载」可重试。
@@ -141,10 +141,6 @@
           <div class="bridge-row">
             <span class="bridge-label">商业版前台</span>
             <span class="bridge-value mono">{{ runtimeStatus.commercialFrontendUrl || '—' }}</span>
-          </div>
-          <div class="bridge-row">
-            <span class="bridge-label">商业版后台</span>
-            <span class="bridge-value mono">{{ runtimeStatus.commercialAdminUrl || '—' }}</span>
           </div>
           <div v-if="runtimeStatus.commercialBridgeMessage" class="bridge-row">
             <span class="bridge-label">桥接消息</span>

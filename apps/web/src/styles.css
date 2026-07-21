@@ -131,7 +131,13 @@ a {
 .nav-scroll {
   overflow: auto;
   padding-right: 2px;
-  flex: 1
+  flex: 1;
+  scrollbar-width: none;
+  -ms-overflow-style: none
+}
+
+.nav-scroll::-webkit-scrollbar {
+  display: none
 }
 
 .nav-group {
@@ -1827,7 +1833,13 @@ input {
     transform: translateX(-100%);
     transition: transform .26s cubic-bezier(.4, 0, .2, 1);
     z-index: 60;
-    overflow-y: auto
+    overflow-y: auto;
+    scrollbar-width: none;
+    -ms-overflow-style: none
+  }
+
+  .sidebar::-webkit-scrollbar {
+    display: none
   }
 
   .sidebar.open {
