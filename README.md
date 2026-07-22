@@ -145,11 +145,15 @@ $env:ADMIN_PASSWORD="your-strong-password"; .\start.bat
 
 | 问题 | 解决方法 |
 |---|---|
-| 端口 8080 被占用 | 修改 `.env` 中的 `WEB_PORT=8081` 后重新运行 `sh ./start.sh --no-pull` |
-| 拉取 GHCR 镜像慢 | 进入"关于我们"页检查更新，切换镜像源；或用 `sh ./start.sh --build` 本地构建 |
-| 忘记 admin 密码 | 删除 `./secrets/admin-password-hash` 后重跑 `sh ./scripts/setup-wizard.sh`，或手动用 bcrypt 生成 hash 写入该文件 |
+| 端口 8080 被占用 | 脚本会自动尝试 8081-8089 并更新 .env；或手动修改 `WEB_PORT` 后运行 `sh ./start.sh --no-pull` |
+| GHCR 镜像拉取慢/失败 | 脚本会自动检测 GHCR 连通性并回退本地构建；国内网络见 [部署教程-国内网络优化](docs/deployment-guide.md#国内网络优化镜像加速) |
+| bcrypt 生成失败 | 本版本已彻底解决——不再在主机生成，改由 api 镜像自动生成（零额外下载） |
+| 忘记 admin 密码 | 删除 `./secrets/admin-password-hash` 后重跑 `sh ./start.sh`，或手动用 bcrypt 生成 hash 写入该文件 |
 | 想更新到最新版 | 进入"关于我们"页 → 点击"检查更新" → 复制脚本执行；或 `git pull && sh ./start.sh` |
 | 局域网其他机器访问不了 | 确认 `.env` 中 `WEB_BIND_ADDRESS=0.0.0.0`（默认即是），防火墙放行 8080 端口 |
+| Docker Desktop 未运行（Windows） | 脚本会自动启动 Docker Desktop 并等待就绪（最长 90 秒） |
+| 磁盘空间不足 | 脚本会预检并警告；清理命令：`docker system prune -a --volumes` |
+| 服务启动失败 | 脚本会自动诊断：显示异常容器状态、各服务最近日志、磁盘空间、端口占用 |
 | 想完全重新初始化 | 删除 `.env` 和 `./secrets/` 目录后重跑 `sh ./start.sh`（注意：会丢失已有数据，请先备份） |
 
 ---

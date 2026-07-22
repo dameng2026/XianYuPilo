@@ -6,13 +6,14 @@
 #   sh ./start.sh --no-pull    # 跳过镜像拉取（用本地已有的镜像）
 #
 # 错误兜底策略：
-#   - Docker 未安装 → 自动安装（get.docker.com）
-#   - secrets 生成失败 → setup-wizard.sh 内部多层兜底
-#   - bcrypt hash 生成失败 → 镜像构建后用 api 容器兜底生成
+#   - Docker 未安装 → 自动安装（get.docker.com，国内网络用阿里云镜像）
+#   - secrets 生成失败 → setup-wizard.sh 只需 openssl/head
+#   - bcrypt hash 生成 → 统一由 api 镜像生成（零额外下载，必定成功）
 #   - 镜像拉取失败 → 自动回退到本地源码构建
-#   - 容器启动失败 → 显示异常服务名和日志查看命令
-#   - 健康检查超时 → 显示日志查看命令
-#   - 端口被占用 → 提示修改 WEB_PORT
+#   - 端口被占用 → 自动查找可用端口并更新 .env
+#   - 磁盘空间不足 → 提前警告并给出清理建议
+#   - 容器启动失败 → 自动诊断并显示异常服务日志
+#   - 健康检查超时 → 分阶段显示进度，失败时自动诊断
 #
 # 注意：不使用 `set -e`，因为部署流程中某些步骤失败时有兜底方案，不应立即终止。
 
@@ -36,6 +37,16 @@ info()  { printf '%s %s\n' "$(color '1;36' '•')" "$*"; }
 ok()    { printf '%s %s\n' "$(color '1;32' '✓')" "$*"; }
 warn()  { printf '%s %s\n' "$(color '1;33' '!')" "$*" >&2; }
 die()   { printf '%s %s\n' "$(color '1;31' '✗')" "$*" >&2; exit 1; }
+
+# 当前时间戳（用于阶段计时）
+now_ms() { date +%s; }
+
+# 格式化耗时秒数
+elapsed_str() {
+  start=$1
+  end=$2
+  printf '%ds' $((end - start))
+}
 
 # 自动安装 Docker（Ubuntu/Debian/CentOS/RHEL/Fedora 等，用官方 get.docker.com 脚本）
 ensure_docker() {
@@ -114,9 +125,7 @@ ensure_docker() {
   ok "Docker 安装完成"
 }
 
-# 用 api 镜像兜底生成 admin bcrypt hash
-# 当 setup-wizard.sh 中所有 bcrypt 生成方案都失败时，此函数在 api 镜像构建后调用
-# api 镜像内一定有 bcrypt（FastAPI 依赖），是最可靠的兜底方案
+# 用 api 镜像兜底生成 admin bcrypt hash（api 镜像内一定有 bcrypt，是最可靠的方案）
 generate_admin_hash_with_api_image() {
   if [ -s "./secrets/admin-password-hash" ]; then
     # 文件非空，检查是否是有效的 bcrypt hash
@@ -125,7 +134,7 @@ generate_admin_hash_with_api_image() {
     fi
   fi
 
-  info "用 api 镜像兜底生成 admin bcrypt hash..."
+  info "用 api 镜像生成 admin bcrypt hash（零额外下载）..."
   ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin123}"
   export ADMIN_PASSWORD
 
@@ -145,11 +154,11 @@ print(bcrypt.hashpw(pw, bcrypt.gensalt(rounds=12)).decode())
   if [ -n "$hash_value" ] && echo "$hash_value" | grep -qE '^\$2[aby]\$'; then
     printf '%s' "$hash_value" > "./secrets/admin-password-hash"
     chmod 644 "./secrets/admin-password-hash" 2>/dev/null || true
-    ok "admin bcrypt hash 兜底生成成功（用 api 镜像）"
+    ok "admin bcrypt hash 生成成功（用 api 镜像）"
     unset ADMIN_PASSWORD
     return 0
   else
-    warn "api 镜像兜底生成也失败"
+    warn "api 镜像生成 hash 失败"
     unset ADMIN_PASSWORD
     return 1
   fi
@@ -168,6 +177,104 @@ check_port_available() {
     fi
   fi
   return 0
+}
+
+# 查找可用端口：从 base_port 开始，依次尝试到 base_port+9
+# 找到可用端口后写入 .env 的 WEB_PORT，并返回该端口
+find_available_port() {
+  base_port=$1
+  for p in $(seq "$base_port" $((base_port + 9))); do
+    if check_port_available "$p"; then
+      echo "$p"
+      return 0
+    fi
+  done
+  echo ""
+  return 1
+}
+
+# 更新 .env 中的 WEB_PORT
+update_env_web_port() {
+  new_port=$1
+  if [ -f .env ]; then
+    # sed -i 在 macOS 和 Linux 上行为不同，用临时文件兼容
+    if grep -q '^WEB_PORT=' .env 2>/dev/null; then
+      sed "s/^WEB_PORT=.*/WEB_PORT=$new_port/" .env > .env.tmp && mv .env.tmp .env
+    else
+      printf 'WEB_PORT=%s\n' "$new_port" >> .env
+    fi
+  fi
+}
+
+# 磁盘空间预检查（建议 ≥10GB）
+check_disk_space() {
+  # 获取项目所在分区的可用空间（KB）
+  avail_kb=0
+  if command -v df >/dev/null 2>&1; then
+    # BSD 和 GNU 兼容的写法
+    avail_kb=$(df -Pk . 2>/dev/null | awk 'NR==2{print $4}') || avail_kb=0
+  fi
+  avail_gb=$((avail_kb / 1024 / 1024))
+
+  if [ "$avail_kb" -gt 0 ]; then
+    if [ "$avail_gb" -lt 5 ]; then
+      warn "磁盘可用空间不足：${avail_gb}GB（建议 ≥10GB）"
+      info "镜像构建 + 数据可能需要 5-10GB，空间不足会导致构建中途失败"
+      info "清理建议：docker system prune -a --volumes（清理未使用的 Docker 资源）"
+      # 不终止，让用户自己决定
+    elif [ "$avail_gb" -lt 10 ]; then
+      info "磁盘可用空间：${avail_gb}GB（建议 ≥10GB，首次构建可能紧张）"
+    else
+      ok "磁盘可用空间：${avail_gb}GB"
+    fi
+  fi
+}
+
+# 检测 GHCR 连通性（5秒超时）
+check_ghcr_reachable() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsS --max-time 5 -o /dev/null https://ghcr.io/v2/ 2>/dev/null && return 0
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO- --timeout=5 https://ghcr.io/v2/ >/dev/null 2>&1 && return 0
+  fi
+  return 1
+}
+
+# 失败自动诊断：收集关键信息供排查
+diagnose_failure() {
+  echo ""
+  warn "========== 自动诊断 =========="
+  # 1. 容器状态
+  info "[1/4] 容器状态："
+  $DOCKER_COMPOSE ps --format 'table {{.Service}}\t{{.Status}}' 2>/dev/null || $DOCKER_COMPOSE ps 2>/dev/null || echo "    无法获取容器状态"
+  echo ""
+  # 2. 异常服务最近日志
+  info "[2/4] 异常服务最近日志（各 50 行）："
+  for svc in mysql redis migrate api worker crawler web; do
+    status=$($DOCKER_COMPOSE ps --format '{{.Status}}' "$svc" 2>/dev/null | head -1) || status=""
+    if echo "$status" | grep -qiE 'exited|failed|unhealthy|restarting'; then
+      echo "    --- $svc ($status) ---"
+      $DOCKER_COMPOSE logs --tail 50 "$svc" 2>/dev/null | tail -30 | sed 's/^/    /'
+      echo ""
+    fi
+  done
+  # 3. 磁盘空间
+  info "[3/4] 磁盘空间："
+  df -h . 2>/dev/null | sed 's/^/    /' || echo "    无法获取磁盘信息"
+  echo ""
+  # 4. 端口占用
+  info "[4/4] 端口占用（WEB_PORT=${WEB_PORT}）："
+  if command -v ss >/dev/null 2>&1; then
+    ss -tlnp 2>/dev/null | grep ":${WEB_PORT} " | sed 's/^/    /' || echo "    端口 ${WEB_PORT} 未被监听"
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -tlnp 2>/dev/null | grep ":${WEB_PORT} " | sed 's/^/    /' || echo "    端口 ${WEB_PORT} 未被监听"
+  fi
+  echo ""
+  info "完整诊断命令："
+  info "  全部日志：$DOCKER_COMPOSE logs --tail 200"
+  info "  单服务：  $DOCKER_COMPOSE logs --tail 200 <服务名>"
+  info "  完全重置：$DOCKER_COMPOSE down -v && rm -rf secrets .env && sh ./start.sh"
+  warn "=============================="
 }
 
 print_access_info() {
@@ -211,6 +318,9 @@ fi
 
 DOCKER_COMPOSE="${SUDO} docker compose"
 
+# ---------- 1.5 磁盘空间预检查 ----------
+check_disk_space
+
 # ---------- 2. 首次启动初始化 ----------
 need_init=0
 [ ! -f .env ] && need_init=1
@@ -219,8 +329,10 @@ need_init=0
 # 检查关键 secrets 文件是否齐全
 for f in admin-password-hash mysql-root-password mysql-app-password mysql-migration-password \
          redis-password jwt-secret cookie-crypto-secret internal-api-token; do
-  [ ! -s "./secrets/$f" ] && need_init=1
+  [ ! -s "./secrets/$f" ] && [ "$f" != "admin-password-hash" ] && need_init=1
 done
+# admin-password-hash 允许为空（由 api 镜像生成），但文件必须存在
+[ ! -f "./secrets/admin-password-hash" ] && need_init=1
 
 if [ "$need_init" = "1" ]; then
   info "首次启动，运行初始化向导..."
@@ -238,12 +350,21 @@ fi
 WEB_PORT="${WEB_PORT:-8080}"
 WEB_BIND="${WEB_BIND_ADDRESS:-0.0.0.0}"
 
-# ---------- 3.5 端口占用检查 ----------
+# ---------- 3.5 端口占用检查 + 自动选择可用端口 ----------
 if ! check_port_available "$WEB_PORT"; then
-  warn "端口 $WEB_PORT 已被占用！"
-  info "解决方法：修改 .env 中的 WEB_PORT=其他端口（如 8081），然后重新运行 sh ./start.sh"
-  info "或检查占用进程：ss -tlnp | grep :${WEB_PORT}"
-  die "端口 $WEB_PORT 被占用，无法启动"
+  warn "端口 $WEB_PORT 已被占用，自动查找可用端口..."
+  new_port=$(find_available_port $((WEB_PORT + 1))) || true
+  if [ -n "$new_port" ]; then
+    info "已自动切换到可用端口：$new_port"
+    update_env_web_port "$new_port"
+    WEB_PORT="$new_port"
+    ok "已将 .env 中的 WEB_PORT 更新为 $WEB_PORT"
+  else
+    warn "端口 $WEB_PORT ~ $((WEB_PORT + 9)) 均被占用"
+    info "解决方法：修改 .env 中的 WEB_PORT=其他端口（如 8090），然后重新运行 sh ./start.sh"
+    info "或检查占用进程：ss -tlnp | grep :${WEB_PORT}"
+    die "无可用端口"
+  fi
 fi
 
 # ---------- 4. 拉取镜像或本地构建 ----------
@@ -259,12 +380,23 @@ if [ "$DO_BUILD" = "1" ]; then
 else
   pull_ok=0
   if [ "$DO_PULL" = "1" ]; then
-    info "拉取最新镜像（首次约 3-5 分钟）..."
-    if $DOCKER_COMPOSE pull 2>&1; then
-      pull_ok=1
+    # 检测 GHCR 连通性，国内网络超时则直接建议本地构建
+    info "检测 GHCR 镜像源连通性..."
+    if check_ghcr_reachable; then
+      ok "GHCR 可达"
+      info "拉取最新镜像（首次约 3-5 分钟）..."
+      if $DOCKER_COMPOSE pull 2>&1; then
+        pull_ok=1
+      else
+        warn "镜像拉取失败（可能是 GHCR 镜像未发布或命名空间不匹配）"
+        info "自动回退到本地源码构建（首次约 5-10 分钟）..."
+        DO_BUILD=1
+      fi
     else
-      warn "镜像拉取失败（可能是 GHCR 镜像未发布或命名空间不匹配）"
-      info "自动回退到本地源码构建（首次约 5-10 分钟）..."
+      warn "GHCR 不可达（国内网络或防火墙限制）"
+      info "建议直接本地构建（避免拉取超时）..."
+      info "如需使用预构建镜像，请配置 Docker registry mirror 或代理后重试"
+      info "正在尝试本地构建..."
       DO_BUILD=1
     fi
   fi
@@ -280,15 +412,14 @@ else
 fi
 
 # ---------- 4.5 兜底生成 admin bcrypt hash（用 api 镜像） ----------
-# setup-wizard.sh 中所有 bcrypt 生成方案都失败时，admin-password-hash 为空
-# 此时 api 镜像已经构建好，用它来生成 hash（api 镜像内一定有 bcrypt）
-if [ -f "./secrets/admin-password-hash" ] && [ ! -s "./secrets/admin-password-hash" ]; then
+# setup-wizard.sh 不再在主机生成 bcrypt hash（避免 pip install / Docker 临时镜像的耗时）
+# api 镜像已经构建/拉取好，用它来生成 hash（api 镜像内一定有 bcrypt，零额外下载）
+if [ ! -s "./secrets/admin-password-hash" ]; then
   generate_admin_hash_with_api_image || {
     warn "无法生成 admin bcrypt hash，服务可能无法启动"
     warn "手动生成方法："
-    warn "  1) 安装 bcrypt: pip3 install --user bcrypt"
-    warn "  2) 生成 hash: python3 -c \"import bcrypt; print(bcrypt.hashpw(b'admin123', bcrypt.gensalt(rounds=12)).decode())\" > ./secrets/admin-password-hash"
-    warn "  3) 重新运行: sh ./start.sh --no-pull"
+    warn "  1) 用 api 镜像：docker run --rm xianyu-assistant-api python -c \"import bcrypt; print(bcrypt.hashpw(b'admin123', bcrypt.gensalt(rounds=12)).decode())\" > ./secrets/admin-password-hash"
+    warn "  2) 重新运行: sh ./start.sh --no-pull"
     die "admin bcrypt hash 生成失败"
   }
 fi
@@ -297,8 +428,8 @@ fi
 info "启动服务..."
 $DOCKER_COMPOSE up -d || die "服务启动失败。查看日志：$DOCKER_COMPOSE logs"
 
-# ---------- 6. 等待 Web 健康检查 ----------
-info "等待服务就绪（最长 3 分钟）..."
+# ---------- 6. 分阶段等待健康检查 ----------
+info "等待服务就绪（分阶段，最长 5 分钟）..."
 
 # curl 或 wget 二选一
 HEALTH_URL="http://127.0.0.1:${WEB_PORT}/readyz"
@@ -311,59 +442,164 @@ else
   HEALTH_CHECK=""
 fi
 
-max_attempts=90
-attempt=0
-while [ "$attempt" -lt "$max_attempts" ]; do
-  attempt=$((attempt + 1))
+phase_start=$(now_ms)
 
-  # 先看容器状态
-  failed_services=$($DOCKER_COMPOSE ps --format '{{.Service}}:{{.Status}}' 2>/dev/null | grep -iE 'exited|failed|unhealthy' || true)
-  if [ -n "$failed_services" ]; then
-    # 检查是否是 migrate 一次性容器退出（这是正常的）
-    real_failed=$(echo "$failed_services" | grep -v '^migrate:' || true)
-    if [ -n "$real_failed" ]; then
-      echo ""
-      warn "以下服务异常："
-      echo "$real_failed" | sed 's/^/    /'
-      echo ""
-      info "排查步骤："
-      info "  1) 查看异常服务日志：$DOCKER_COMPOSE logs --tail 100 <服务名>"
-      info "  2) 常见原因：端口冲突、内存不足、secrets 文件权限、数据库初始化失败"
-      info "  3) 完全重置：$DOCKER_COMPOSE down -v && rm -rf secrets .env && sh ./start.sh"
-      exit 1
-    fi
+# 阶段 1：等待 MySQL healthy
+printf '  [1/5] MySQL...'
+stage_start=$(now_ms)
+mysql_ok=0
+i=0
+while [ "$i" -lt 60 ]; do
+  status=$($DOCKER_COMPOSE ps --format '{{.Health}}' mysql 2>/dev/null | head -1) || status=""
+  if [ "$status" = "healthy" ]; then
+    mysql_ok=1
+    break
   fi
-
-  if [ -n "$HEALTH_CHECK" ]; then
-    if eval "$HEALTH_CHECK"; then
-      echo ""
-      ok "服务已就绪"
-      echo ""
-      print_access_info
-      exit 0
-    fi
-  else
-    # 没有 curl/wget，只检查容器健康状态
-    healthy=$($DOCKER_COMPOSE ps --format '{{.Health}}' 2>/dev/null | grep -c 'healthy' || echo 0)
-    total=$($DOCKER_COMPOSE ps --format '{{.Service}}' 2>/dev/null | grep -vc '^migrate$' || echo 0)
-    if [ "$healthy" -ge "$total" ] && [ "$total" -gt 0 ]; then
-      echo ""
-      ok "服务已就绪"
-      echo ""
-      print_access_info
-      exit 0
-    fi
+  # 检查是否 exited
+  s=$($DOCKER_COMPOSE ps --format '{{.Status}}' mysql 2>/dev/null | head -1) || s=""
+  if echo "$s" | grep -qiE 'exited|failed'; then
+    break
   fi
-
   printf '.'
   sleep 2
+  i=$((i + 1))
 done
+stage_end=$(now_ms)
+if [ "$mysql_ok" = "1" ]; then
+  printf ' ✓ (%s)\n' "$(elapsed_str "$stage_start" "$stage_end")"
+else
+  printf ' ✗ 失败\n'
+  warn "MySQL 启动失败，可能是磁盘空间不足或 secrets 权限问题"
+  diagnose_failure
+  exit 1
+fi
+
+# 阶段 2：等待 migrate 完成（一次性容器）
+printf '  [2/5] 数据库迁移...'
+stage_start=$(now_ms)
+migrate_ok=0
+i=0
+while [ "$i" -lt 60 ]; do
+  s=$($DOCKER_COMPOSE ps --format '{{.Status}}' migrate 2>/dev/null | head -1) || s=""
+  if echo "$s" | grep -qiE 'exited.*code.*0|exited.*0'; then
+    migrate_ok=1
+    break
+  fi
+  if echo "$s" | grep -qiE 'exited.*[1-9]|failed'; then
+    break
+  fi
+  printf '.'
+  sleep 2
+  i=$((i + 1))
+done
+stage_end=$(now_ms)
+if [ "$migrate_ok" = "1" ]; then
+  printf ' ✓ (%s)\n' "$(elapsed_str "$stage_start" "$stage_end")"
+else
+  printf ' ✗ 失败\n'
+  warn "数据库迁移失败，可能是密码不匹配或迁移脚本错误"
+  info "查看 migrate 日志：$DOCKER_COMPOSE logs --tail 100 migrate"
+  diagnose_failure
+  exit 1
+fi
+
+# 阶段 3：等待 Redis healthy
+printf '  [3/5] Redis...'
+stage_start=$(now_ms)
+redis_ok=0
+i=0
+while [ "$i" -lt 30 ]; do
+  status=$($DOCKER_COMPOSE ps --format '{{.Health}}' redis 2>/dev/null | head -1) || status=""
+  if [ "$status" = "healthy" ]; then
+    redis_ok=1
+    break
+  fi
+  printf '.'
+  sleep 2
+  i=$((i + 1))
+done
+stage_end=$(now_ms)
+if [ "$redis_ok" = "1" ]; then
+  printf ' ✓ (%s)\n' "$(elapsed_str "$stage_start" "$stage_end")"
+else
+  printf ' ✗ 失败\n'
+  warn "Redis 启动失败"
+  diagnose_failure
+  exit 1
+fi
+
+# 阶段 4：等待 API healthy
+printf '  [4/5] API...'
+stage_start=$(now_ms)
+api_ok=0
+i=0
+while [ "$i" -lt 60 ]; do
+  status=$($DOCKER_COMPOSE ps --format '{{.Health}}' api 2>/dev/null | head -1) || status=""
+  if [ "$status" = "healthy" ]; then
+    api_ok=1
+    break
+  fi
+  s=$($DOCKER_COMPOSE ps --format '{{.Status}}' api 2>/dev/null | head -1) || s=""
+  if echo "$s" | grep -qiE 'exited|failed'; then
+    break
+  fi
+  printf '.'
+  sleep 2
+  i=$((i + 1))
+done
+stage_end=$(now_ms)
+if [ "$api_ok" = "1" ]; then
+  printf ' ✓ (%s)\n' "$(elapsed_str "$stage_start" "$stage_end")"
+else
+  printf ' ✗ 失败\n'
+  warn "API 启动失败"
+  info "查看 API 日志：$DOCKER_COMPOSE logs --tail 100 api"
+  diagnose_failure
+  exit 1
+fi
+
+# 阶段 5：等待 Web healthy + /readyz
+printf '  [5/5] Web...'
+stage_start=$(now_ms)
+web_ok=0
+i=0
+while [ "$i" -lt 30 ]; do
+  # 先检查容器健康
+  status=$($DOCKER_COMPOSE ps --format '{{.Health}}' web 2>/dev/null | head -1) || status=""
+  if [ "$status" = "healthy" ]; then
+    # 再检查 /readyz
+    if [ -n "$HEALTH_CHECK" ]; then
+      if eval "$HEALTH_CHECK"; then
+        web_ok=1
+        break
+      fi
+    else
+      web_ok=1
+      break
+    fi
+  fi
+  s=$($DOCKER_COMPOSE ps --format '{{.Status}}' web 2>/dev/null | head -1) || s=""
+  if echo "$s" | grep -qiE 'exited|failed'; then
+    break
+  fi
+  printf '.'
+  sleep 2
+  i=$((i + 1))
+done
+stage_end=$(now_ms)
+total_end=$(now_ms)
+
+if [ "$web_ok" = "1" ]; then
+  printf ' ✓ (%s)\n' "$(elapsed_str "$stage_start" "$stage_end")"
+  echo ""
+  ok "服务已就绪（总耗时 $(elapsed_str "$phase_start" "$total_end")）"
+  echo ""
+  print_access_info
+  exit 0
+fi
 
 echo ""
-warn "服务启动超时（3 分钟内未通过健康检查）"
-info "排查步骤："
-info "  1) 查看所有服务状态：$DOCKER_COMPOSE ps"
-info "  2) 查看日志：$DOCKER_COMPOSE logs --tail 200"
-info "  3) 如 MySQL 初始化慢，可等待后重试：$DOCKER_COMPOSE up -d"
-info "  4) 完全重置：$DOCKER_COMPOSE down -v && rm -rf secrets .env && sh ./start.sh"
+printf ' ✗ 失败\n'
+warn "服务启动超时（Web 健康检查未通过）"
+diagnose_failure
 die "服务启动超时"

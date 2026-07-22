@@ -47,10 +47,12 @@ sh ./start.sh          # Linux / macOS
 
 | 场景 | 耗时 |
 |---|---|
-| 首次部署（含 Docker 安装 + 镜像构建） | 约 8-10 分钟 |
-| 首次部署（已装 Docker + 镜像构建） | 约 7-8 分钟 |
-| 首次部署（已装 Docker + 拉取预构建镜像） | 约 3-5 分钟 |
-| 二次部署（镜像已缓存） | 约 2 分钟 |
+| 首次部署（含 Docker 安装 + 镜像构建） | 约 5-8 分钟 |
+| 首次部署（已装 Docker + 镜像构建） | 约 4-6 分钟 |
+| 首次部署（已装 Docker + 拉取预构建镜像） | 约 2-4 分钟 |
+| 二次部署（镜像已缓存） | 约 1-2 分钟 |
+
+> 注：本版本已移除主机 bcrypt 生成环节（原 5-15 分钟），改为由 api 镜像在启动前自动生成（零额外下载），部署时长显著缩短。
 
 ---
 
@@ -82,14 +84,19 @@ sh ./start.sh
 脚本会自动完成以下所有工作：
 
 1. **检测 Docker**：若未安装，自动调用 Docker 官方 `get.docker.com` 脚本安装（约 1 分钟），并启动 Docker 服务
-2. **首次初始化**：调用 `scripts/setup-wizard.sh`
+2. **磁盘空间预检查**：检查当前分区可用空间，不足 5GB 时警告并给出清理建议
+3. **首次初始化**：调用 `scripts/setup-wizard.sh`
    - 在 `./secrets/` 目录生成 7 组随机密钥（MySQL root/app/migration、Redis、JWT、Cookie、Internal Token，均 Base64URL 编码，长度 ≥32 字符）
    - 生成 4 个空的可选密钥文件（商业版桥接、AI、地图等，未启用时为空）
-   - 用 bcrypt cost 12 生成 admin 密码 hash（默认密码 `admin123`，可用环境变量自定义）
+   - 创建空的 `admin-password-hash` 文件（由 api 镜像在启动前自动生成 bcrypt hash，无需主机 Python）
    - 从 `.env.example` 复制生成 `.env`
-3. **拉取镜像或本地构建**：优先尝试拉取 GHCR 预构建镜像；若拉取失败（如镜像未发布、命名空间不匹配），自动回退到本地源码构建
-4. **启动 7 个服务**：mysql、redis、migrate（一次性）、crawler、api、worker、web
-5. **等待健康检查**：最长 3 分钟，轮询 `/readyz` 端点
+4. **端口冲突自动处理**：若 8080 被占用，自动尝试 8081-8089，找到可用端口后自动更新 `.env`
+5. **GHCR 连通性检测**：拉取前检测 GHCR 是否可达，不可达时直接本地构建（避免拉取超时）
+6. **拉取镜像或本地构建**：优先尝试拉取 GHCR 预构建镜像；若拉取失败或 GHCR 不可达，自动回退到本地源码构建
+7. **bcrypt hash 自动生成**：用已就绪的 api 镜像生成 admin 密码 hash（零额外下载，必定成功）
+8. **启动 7 个服务**：mysql、redis、migrate（一次性）、crawler、api、worker、web
+9. **分阶段健康检查**：按依赖顺序检查 MySQL → migrate → Redis → API → Web，每阶段显示进度和耗时
+10. **失败自动诊断**：任一阶段失败时自动收集容器状态、异常服务日志、磁盘空间、端口占用，生成诊断报告
 
 #### 步骤 3：访问服务
 
@@ -226,14 +233,19 @@ start.bat
 
 脚本会自动完成以下工作：
 
-1. **检测 Docker**：若未运行会提示启动 Docker Desktop
-2. **首次初始化**：调用 `scripts/setup-wizard.ps1`（PowerShell 脚本，自动用 `-ExecutionPolicy Bypass` 启动，无需修改系统策略）
-   - 生成 7 组随机 secrets
-   - 用 bcrypt cost 12 生成 admin 密码 hash
+1. **检测 Docker**：若未安装会提示安装；若已安装但未运行，**自动启动 Docker Desktop** 并等待就绪（最长 90 秒）
+2. **磁盘空间预检查**：检查当前分区可用空间，不足 5GB 时警告并给出清理建议
+3. **首次初始化**：调用 `scripts/setup-wizard.ps1`（PowerShell 脚本，自动用 `-ExecutionPolicy Bypass` 启动，无需修改系统策略）
+   - 生成 7 组随机 secrets（使用系统内置 RNG，无需 Python）
+   - 创建空的 `admin-password-hash` 文件（由 api 镜像在启动前自动生成 bcrypt hash）
    - 从 `.env.example` 复制生成 `.env`
-3. **拉取镜像或本地构建**：与 Linux 版本一致
-4. **启动 7 个服务**
-5. **等待健康检查**
+4. **端口冲突自动处理**：若 8080 被占用，自动尝试 8081-8089，找到可用端口后自动更新 `.env`
+5. **GHCR 连通性检测**：拉取前检测 GHCR 是否可达，不可达时直接本地构建
+6. **拉取镜像或本地构建**：与 Linux 版本一致
+7. **bcrypt hash 自动生成**：用已就绪的 api 镜像生成（零额外下载，必定成功）
+8. **启动 7 个服务**
+9. **分阶段健康检查**：MySQL → migrate → Redis → API → Web，每阶段显示进度
+10. **失败自动诊断**：任一阶段失败时自动收集容器状态、异常服务日志、磁盘空间、端口占用
 
 #### 步骤 4：访问服务
 
@@ -399,16 +411,16 @@ git pull
 
 ### Q1：端口 8080 被占用
 
-**现象**：启动失败，提示端口被占用。
+**现象**：启动时提示端口被占用。
 
-**解决**：修改 `.env` 中的 `WEB_PORT`：
+**解决**：本版本已自动处理——脚本会自动尝试 8081-8089，找到可用端口后自动更新 `.env` 并继续启动。如需手动指定：
 
 ```bash
 # Linux / macOS
-sed -i 's/^WEB_PORT=8080/WEB_PORT=8081/' .env
+sed -i 's/^WEB_PORT=8080/WEB_PORT=8090/' .env
 sh ./start.sh --no-pull
 
-# Windows：用文本编辑器打开 .env，将 WEB_PORT=8080 改为 WEB_PORT=8081
+# Windows：用文本编辑器打开 .env，将 WEB_PORT=8080 改为 WEB_PORT=8090
 .\start.bat --no-pull
 ```
 
@@ -423,60 +435,28 @@ sh ./start.sh --no-pull
 
 ### Q3：bcrypt hash 生成失败（NAS / 离线环境）
 
-**现象**：setup-wizard 提示"所有 bcrypt 生成方案均失败"，或 `ModuleNotFoundError: No module named 'bcrypt'`。
+**现象**：setup-wizard 提示"admin-password-hash 将由 api 镜像自动生成"，或启动时 bcrypt 相关错误。
 
-**原因**：NAS（极空间/群晖）或离线环境下，主机 Python 未装 bcrypt，且 Docker 容器内 `pip install bcrypt` 因网络或编译环境失败。
+**原因**：旧版本在主机生成 bcrypt hash，需要 Python + bcrypt 包，NAS/离线环境经常失败。
 
-**解决**：本版本已实现多层兜底，正常情况下会自动处理。若仍失败，按以下顺序尝试：
+**解决**：本版本已彻底解决——**不再在主机生成 bcrypt hash**。setup-wizard 只创建空文件，`start.sh` / `start.bat` 会在 api 镜像就绪后自动用它生成 hash（api 镜像内一定有 bcrypt，零额外下载，必定成功）。正常情况下无需任何手动操作。
 
-**方法 A：用 api 镜像兜底生成（推荐）**
+若 api 镜像生成也失败（极罕见，通常是镜像损坏），按以下顺序尝试：
 
-`start.sh` / `start.bat` 已内置此兜底逻辑。如果 setup-wizard 生成失败，它会创建空文件作为标记，然后 start 脚本在镜像构建后自动用 api 容器生成：
+**方法 A：重新构建 api 镜像**
 
 ```bash
 # Linux / macOS
-sh ./start.sh --build    # 强制本地构建，构建后自动用 api 镜像生成 hash
+sh ./start.sh --build    # 强制重新构建，构建后自动生成 hash
 
 # Windows
 .\start.bat --build
 ```
 
-**方法 B：手动安装 bcrypt 后重试**
+**方法 B：手动用 api 镜像生成 hash 写入文件**
 
 ```bash
-# Linux / macOS
-pip3 install --user bcrypt
-# 或使用国内源加速
-pip3 install --user -i https://pypi.tuna.tsinghua.edu.cn/simple bcrypt
-
-# 验证安装
-python3 -c "import bcrypt; print('OK')"
-
-# 删除空的 hash 文件，重新运行
-rm ./secrets/admin-password-hash
-sh ./start.sh
-
-# Windows
-pip install bcrypt
-del secrets\admin-password-hash
-.\start.bat
-```
-
-**方法 C：手动生成 hash 写入文件**
-
-在任意已安装 bcrypt 的机器上（包括其他 Docker 容器）生成：
-
-```bash
-# 用 Docker 临时容器生成（使用国内源）
-docker run --rm python:3.11-slim sh -c '
-  pip install --quiet --no-cache-dir \
-    -i https://pypi.tuna.tsinghua.edu.cn/simple \
-    --trusted-host pypi.tuna.tsinghua.edu.cn \
-    bcrypt && \
-  python -c "import bcrypt; print(bcrypt.hashpw(b\"admin123\", bcrypt.gensalt(rounds=12)).decode())"
-' > ./secrets/admin-password-hash
-
-# 或用 api 镜像生成（如果已构建）
+# 用已构建的 api 镜像生成（最可靠）
 docker run --rm xianyu-assistant-api python -c \
   "import bcrypt; print(bcrypt.hashpw(b'admin123', bcrypt.gensalt(rounds=12)).decode())" \
   > ./secrets/admin-password-hash
@@ -488,7 +468,7 @@ cat ./secrets/admin-password-hash
 sh ./start.sh --no-pull
 ```
 
-**方法 D：完全重新初始化**
+**方法 C：完全重新初始化**
 
 ```bash
 # Linux / macOS
@@ -501,17 +481,62 @@ del .env
 .\start.bat
 ```
 
-### Q4：镜像拉取失败（denied）
+### Q4：镜像拉取失败（denied / 超时）
 
-**现象**：`Error response from daemon: error from registry: denied`
+**现象**：`Error response from daemon: error from registry: denied` 或拉取超时。
 
-**原因**：GHCR 上的预构建镜像未发布或命名空间不匹配。
+**原因**：GHCR 上的预构建镜像未发布、命名空间不匹配，或国内网络无法访问 GHCR。
 
-**解决**：`start.sh` / `start.bat` 已自动回退到本地构建。如仍失败，强制本地构建：
+**解决**：`start.sh` / `start.bat` 已自动处理——拉取前会检测 GHCR 连通性，不可达时直接本地构建。如仍失败：
 
 ```bash
 sh ./start.sh --build          # Linux / macOS
 .\start.bat --build            # Windows
+```
+
+#### 国内网络优化（镜像加速）
+
+如果在国内部署且本地构建也慢（npm/pip 下载慢），可配置镜像加速：
+
+**1. 配置 Docker registry mirror（加速基础镜像拉取）**
+
+```bash
+# Linux：编辑 /etc/docker/daemon.json
+sudo tee /etc/docker/daemon.json <<'EOF'
+{
+  "registry-mirrors": [
+    "https://docker.m.daocloud.io",
+    "https://dockerproxy.com",
+    "https://docker.nju.edu.cn",
+    "https://docker.1panel.live"
+  ]
+}
+EOF
+sudo systemctl restart docker
+```
+
+Windows 用户在 Docker Desktop → Settings → Docker Engine 中添加上述 `registry-mirrors` 配置。
+
+**2. 使用代理拉取预构建镜像**
+
+```bash
+# 设置 Docker 代理（Linux）
+sudo mkdir -p /etc/systemd/system/docker.service.d
+sudo tee /etc/systemd/system/docker.service.d/http-proxy.conf <<'EOF'
+[Service]
+Environment="HTTPS_PROXY=http://127.0.0.1:7890"
+Environment="NO_PROXY=localhost,127.0.0.1"
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart docker
+```
+
+**3. 切换镜像源后重新拉取**
+
+```bash
+sh ./start.sh --no-pull    # 用已拉取/构建的镜像启动
+# 或
+sh ./start.sh              # 重新尝试拉取
 ```
 
 ### Q5：忘记 admin 密码

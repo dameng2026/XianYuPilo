@@ -10,6 +10,36 @@
 
 ### 新增
 - **自动发货补发兜底循环**：worker 新增每 10 分钟（可配置）扫描已开启自动发货但未发出的订单，复用 RealtimeDeliveryCoordinator 的幂等状态机安全补发；覆盖 WS 事件丢失、可重试错误失败、启动遗漏等场景；新增 `POST /auto-delivery/recover` 手动触发接口与前端"立即补发未发货订单"按钮；新增 `DELIVERY_RECOVERY_*` 环境变量配置开关、间隔、批量、最小订单年龄
+- **广告申请支付功能接入**：开源版广告申请页面经美国服务器（154.9.254.86:82 Nginx）中转连接商业版后端（1.12.66.249:18080），开源版不直接接触商业版 IP；支持易支付（yipay）微信扫码支付，返回真实 zpayz.cn 支付二维码与 base64 图片；申请意图与支付下单双幂等键（LocalStorage 持久化），支持失败安全重试；商业桥接 fail-closed 三能力 flag（mutation_idempotency / payment_idempotency / paid_ad_placement）全部通过才解锁提交；新增"公司或主体名称"必填字段（前端模型、UI、后端校验三层联动）
+- **自动回复范围管理**：新增 `auto_reply_scope` 路由模块，支持会话级别的自动回复开关控制，可针对单个会话启停自动回复
+- **送货工作流兼容性增强**：`delivery_workflow_compat` 路由扩展发货工作流兼容接口，补齐发货配置与文本源相关端点
+- **自动发货补发恢复服务**：新增 `delivery_recovery.py` 服务，worker 集成定期补发扫描逻辑，覆盖 WS 事件丢失与启动遗漏场景
+- **数据库迁移 031/032**：新增 `031_conversation_auto_reply_state`（会话自动回复状态持久化）、`032_delivery_text_source_card_mode`（发货文本源卡片模式）两份版本化迁移脚本
+
+### 变更
+- **系统配置页隐藏商业版后台地址**：开源版"商业版桥接状态"板块不再展示商业版后台 URL，仅保留商业版前台 URL 用于引流；后端 `/system/runtime-status` 与 `commercial_bridge.get_commercial_bridge_runtime` 同步移除 `commercialAdminUrl` 字段返回（保留 `commercialFrontendUrl`），避免开源用户通过浏览器获取商业版后台地址；同时 `commercialBridgeMessage` 中的 http(s) URL 统一脱敏为 `[已隐藏]`，防止 httpx 异常消息泄露商业版后端 origin
+- **商品管理页面重写**：移除擦亮功能（删除 `item_polish.py` 及前端 `ItemPolishConflictCard` / `ItemPolishUnknownReconcile` / `useItemPolish` / `itemPolishState` 共 2134+ 行代码）；修复商品封面图显示（9 字段兜底 + 协议修正）；库存逻辑改为默认 999（获取不到真实库存或为 0 时）；曝光/浏览/想要数据兼容多版本字段并从多源头提取；商品同步逻辑对齐商业版
+- **首页轮播图位置调整**：轮播图移至顶部"新手三步"板块上方，符合内容优先级
+- **.env.example 商业桥接配置**：新增 `COMMERCIAL_BACKEND_BASE_URL`、`COMMERCIAL_BACKEND_ACCESS_TOKEN`、3 个能力 flag（`COMMERCIAL_BACKEND_MUTATION_IDEMPOTENCY_ENABLED` / `PAYMENT_IDEMPOTENCY_ENABLED` / `PAID_AD_PLACEMENT_ENFORCED`）配置项
+- **docker-compose 数据保留策略**：新增 MySQL binlog 过期时间配置，避免系统盘被 binlog 撑满
+
+### 优化
+- **部署简化：bcrypt 生成彻底重构**：移除 setup-wizard 中 6 层 bcrypt fallback 链（主机 Python → pip install → Docker slim → 国内源 → alpine → api 镜像），改为只创建空文件，由 start.sh / start.bat 在 api 镜像就绪后统一生成（零额外下载，必定成功）；消除 NAS/离线环境最大部署痛点，部署时长缩短 5-15 分钟
+- **部署兜底：端口冲突自动选择**：8080 被占用时自动尝试 8081-8089，找到可用端口后自动更新 .env，无需用户手动修改配置
+- **部署兜底：磁盘空间预检查**：启动前检查可用空间，不足 5GB 时警告并给出 `docker system prune` 清理建议，避免构建中途失败
+- **部署兜底：GHCR 连通性检测**：拉取前 5 秒超时检测 GHCR 可达性，不可达时直接本地构建，避免国内网络下拉取超时浪费数分钟
+- **部署兜底：Windows Docker Desktop 自动启动**：检测到 Docker 引擎未运行时自动启动 Docker Desktop 并等待就绪（最长 90 秒），无需用户手动启动
+- **部署兜底：分阶段健康检查**：按依赖顺序检查 MySQL → migrate → Redis → API → Web，每阶段显示进度和耗时，总耗时实时反馈
+- **部署兜底：失败自动诊断**：任一阶段失败时自动收集容器状态、异常服务最近日志、磁盘空间、端口占用，生成诊断报告，减少用户排查时间
+
+### 修复
+- **自动发货后订单状态不更新**：自动发货配置表单缺少"自动确认发货"开关，导致 `autoConfirmShipment` 永远为默认值 0，卡密/文本消息发送成功后既不调用闲鱼平台确认发货接口，也不更新本地订单状态；现已在"自动发货 → 配置 → 高级设置"中增加开关，开启后发送成功会调用平台确认发货并把订单标记为已发货
+- **MessagesPage 重复声明**：`toggleConversationAutoReply` import 与本地函数同名导致 Vite 构建报 `Identifier has already been declared`，改为别名导入 `toggleConversationAutoReplyApi`
+- **广告申请 companyName 缺失**：商业版后端要求 `companyName` 必填，但开源版前端表单、payload 构建函数、后端校验均未传递此字段，导致申请提交返回 502 "广告申请结果未确认"；已在前端模型、UI 输入框、后端 `_validated_ad_application_payload` 三层补全
+
+## [v1.2.0] - 2026-07-20
+
+### 新增
 - **一键启动脚本**：新增 `start.sh`（Linux/macOS）与 `start.bat`（Windows）入口脚本，自动调用初始化向导、拉取镜像、启动 7 个服务并等待健康检查；支持 `--build`（本地源码构建）和 `--no-pull`（跳过拉取）参数
 - **首次初始化向导**：新增 `scripts/setup-wizard.sh` 与 `scripts/setup-wizard.ps1`，首次启动自动生成 7 组随机 secrets（MySQL root/app/migration 三组、Redis、JWT、Cookie、Token，均 Base64URL 编码 ≥32 字符）、4 个空的可选 secrets、bcrypt cost 12 admin 密码 hash 和 `.env` 文件；优先用主机 Python，缺失时自动退到 Docker 临时容器生成
 - **跨平台运维包装器**：新增 `scripts/production_ops.py`，提供 `status`/`logs`/`stop`/`restart` 四个子命令，限制日志服务名白名单（mysql/redis/migrate/api/worker/crawler/web）和 `--tail` 范围（1-10000），停止命令默认不删除命名卷
@@ -23,11 +53,6 @@
 - **首次登录引导清单**：`DashboardPage` 顶部接入 `OnboardingChecklist`，通过 `localStorage` 持久化完成状态，支持"不再提示"按钮；自动检查 `/system/runtime-status` 同步模型配置完成情况
 - **README 快速上手章节**：新增"3 分钟快速上手"章节，包含前置要求、3 步启动、常见问题表格，新手无需阅读生产部署详细文档即可上手
 - **错误文案带下一步建议**：`friendlyError.js` 扩展数据库/Redis/WebSocket/Token 失效/同步失败等错误的文案，直接告诉用户"下一步该怎么做"
-- **广告申请支付功能接入**：开源版广告申请页面经美国服务器（154.9.254.86:82 Nginx）中转连接商业版后端（1.12.66.249:18080），开源版不直接接触商业版 IP；支持易支付（yipay）微信扫码支付，返回真实 zpayz.cn 支付二维码与 base64 图片；申请意图与支付下单双幂等键（LocalStorage 持久化），支持失败安全重试；商业桥接 fail-closed 三能力 flag（mutation_idempotency / payment_idempotency / paid_ad_placement）全部通过才解锁提交；新增"公司或主体名称"必填字段（前端模型、UI、后端校验三层联动）
-- **自动回复范围管理**：新增 `auto_reply_scope` 路由模块，支持会话级别的自动回复开关控制，可针对单个会话启停自动回复
-- **送货工作流兼容性增强**：`delivery_workflow_compat` 路由扩展发货工作流兼容接口，补齐发货配置与文本源相关端点
-- **自动发货补发恢复服务**：新增 `delivery_recovery.py` 服务，worker 集成定期补发扫描逻辑，覆盖 WS 事件丢失与启动遗漏场景
-- **数据库迁移 031/032**：新增 `031_conversation_auto_reply_state`（会话自动回复状态持久化）、`032_delivery_text_source_card_mode`（发货文本源卡片模式）两份版本化迁移脚本
 
 ### 优化
 - **商品管理页面健壮性**：pollSyncProgress 增加连续失败熔断（3次即抛错）与严格响应校验（status 白名单/pct 范围[0,100]/对象类型校验）；init 改为分步容错加载（账号失败不阻塞后续）；loadGoodsStats 严格校验排除 null/undefined/空字符串；syncAllAccounts 进度防倒退（删除每账号 progress=0 重置）；batchDeleteProducts 增加 warnings 分类（remote_confirmed/warn 类型记为需人工核对而非失败）
@@ -36,22 +61,13 @@
 - **API 数据工具增强**：apiData.js 新增 recordsOfOrThrow（严格版，异常抛错）；totalOf 增加 Number.isSafeInteger 与负数校验
 - **账号鉴权工具增强**：accountAuth.js 新增 pickPreferredAccount（智能账号选择）、accountWsConnectionState（WS 三态）、resolveAccountAuthDisplayState（Cookie+WS 综合状态）、shouldAttemptAccountWebSocketStart
 
-### 变更
-- **系统配置页隐藏商业版后台地址**：开源版"商业版桥接状态"板块不再展示商业版后台 URL，仅保留商业版前台 URL 用于引流；后端 `/system/runtime-status` 与 `commercial_bridge.get_commercial_bridge_runtime` 同步移除 `commercialAdminUrl` 字段返回（保留 `commercialFrontendUrl`），避免开源用户通过浏览器获取商业版后台地址；同时 `commercialBridgeMessage` 中的 http(s) URL 统一脱敏为 `[已隐藏]`，防止 httpx 异常消息泄露商业版后端 origin
-- **商品管理页面重写**：移除擦亮功能（删除 `item_polish.py` 及前端 `ItemPolishConflictCard` / `ItemPolishUnknownReconcile` / `useItemPolish` / `itemPolishState` 共 2134+ 行代码）；修复商品封面图显示（9 字段兜底 + 协议修正）；库存逻辑改为默认 999（获取不到真实库存或为 0 时）；曝光/浏览/想要数据兼容多版本字段并从多源头提取；商品同步逻辑对齐商业版
-- **首页轮播图位置调整**：轮播图移至顶部"新手三步"板块上方，符合内容优先级
-- **.env.example 商业桥接配置**：新增 `COMMERCIAL_BACKEND_BASE_URL`、`COMMERCIAL_BACKEND_ACCESS_TOKEN`、3 个能力 flag（`COMMERCIAL_BACKEND_MUTATION_IDEMPOTENCY_ENABLED` / `PAYMENT_IDEMPOTENCY_ENABLED` / `PAID_AD_PLACEMENT_ENFORCED`）配置项
-- **docker-compose 数据保留策略**：新增 MySQL binlog 过期时间配置，避免系统盘被 binlog 撑满
-
 ### 修复
-- **自动发货后订单状态不更新**：自动发货配置表单缺少"自动确认发货"开关，导致 `autoConfirmShipment` 永远为默认值 0，卡密/文本消息发送成功后既不调用闲鱼平台确认发货接口，也不更新本地订单状态；现已在"自动发货 → 配置 → 高级设置"中增加开关，开启后发送成功会调用平台确认发货并把订单标记为已发货
+- **bcrypt hash 生成兜底链**：NAS 等离线环境运行 `sh ./start.sh` 时 `pip install bcrypt` 静默失败（`set -eu` + `2>/dev/null` 吞掉错误），导致 admin 密码 hash 为空、容器启动 fail-closed；新增 5 层兜底链（主机 Python → pip install → Docker slim → 国内源 → alpine）并以 api Docker 镜像作为最终兜底，同步更新 `docs/deployment-guide.md` Q3 提供 4 种手动解决方案
 - **docker-compose secrets 机制修复**：原 `secrets:` 顶层使用 `environment: ADMIN_PASSWORD_HASH` 模式期望主机环境变量为明文，但 `.env.example` 仅配置了 `_FILE` 路径变量，导致 `docker compose up` 时 secret 内容为空触发 fail-closed 启动失败；现统一改为 `file: ./secrets/<name>` 模式，与 `.env.example` 的 `_FILE` 路径完全对齐
 - **生产部署默认值修复**：`.env.example` 中 `AUDIT_MUTATION_INTENT_REQUIRED` 改为 `true`（生产预检强制要求），`WEB_BIND_ADDRESS` 改为 `0.0.0.0`（便于局域网访问，原 `127.0.0.1` 导致 VPS 部署后浏览器无法访问）
 - **订单同步结果判断 BUG**：syncCurrentOrder 此前忽略 data.ok 字段，同步失败时仍显示绿色成功提示；现改为基于 data.ok 分支显示成功或失败
 - **订单详情回退到行数据**：selectOrder 此前在详情加载失败时回退到 row 概要数据当详情展示；现改为严格校验 id 匹配，失败时不回退
 - **仪表盘功能特性板块溢出**：在 1501-1680px 中宽屏下，「功能特性」与「快速开始」卡片降为 3 列布局，解决 4 列时单卡过窄导致长描述与「点击进入 XXX」副文本大量换行、超出容器的问题
-- **MessagesPage 重复声明**：`toggleConversationAutoReply` import 与本地函数同名导致 Vite 构建报 `Identifier has already been declared`，改为别名导入 `toggleConversationAutoReplyApi`
-- **广告申请 companyName 缺失**：商业版后端要求 `companyName` 必填，但开源版前端表单、payload 构建函数、后端校验均未传递此字段，导致申请提交返回 502 "广告申请结果未确认"；已在前端模型、UI 输入框、后端 `_validated_ad_application_payload` 三层补全
 
 ## [v1.1.0] - 2026-07-15
 
