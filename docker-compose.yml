@@ -100,7 +100,7 @@ services:
 
   crawler:
     <<: *service-defaults
-    image: ${CRAWLER_IMAGE:-ghcr.io/xianyu-assistant-opensource/xianyu-assistant-crawler:latest}
+    image: ${CRAWLER_IMAGE:-registry.cn-hangzhou.aliyuncs.com/xianyu-assistant/xianyu-assistant-crawler:latest}
     build:
       context: ./apps/crawler
     user: pwuser
@@ -153,7 +153,7 @@ services:
     <<: *service-defaults
     build:
       context: ./apps/api
-    image: ${API_IMAGE:-ghcr.io/xianyu-assistant-opensource/xianyu-assistant-api:latest}
+    image: ${API_IMAGE:-registry.cn-hangzhou.aliyuncs.com/xianyu-assistant/xianyu-assistant-api:latest}
     command: ["python", "-m", "app.migrations", "upgrade"]
     restart: "no"
     user: "10001:10001"
@@ -223,7 +223,7 @@ services:
     <<: *service-defaults
     build:
       context: ./apps/api
-    image: ${API_IMAGE:-ghcr.io/xianyu-assistant-opensource/xianyu-assistant-api:latest}
+    image: ${API_IMAGE:-registry.cn-hangzhou.aliyuncs.com/xianyu-assistant/xianyu-assistant-api:latest}
     user: "10001:10001"
     read_only: true
     cap_drop:
@@ -405,7 +405,7 @@ services:
 
   web:
     <<: *service-defaults
-    image: ${WEB_IMAGE:-ghcr.io/xianyu-assistant-opensource/xianyu-assistant-web:latest}
+    image: ${WEB_IMAGE:-registry.cn-hangzhou.aliyuncs.com/xianyu-assistant/xianyu-assistant-web:latest}
     build:
       context: ./apps/web
     user: nginx

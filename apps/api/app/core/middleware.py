@@ -26,11 +26,7 @@ _PUBLIC_API_PATHS = {
     "/api/auth/login",
     "/api/feishu/webhook",
     "/api/sse/subscribe",
-    # 广告展示接口：公共可读，任何人无需登录即可查看商业版配置的轮播图和文本广告
-    "/api/carousel/list",
-    "/api/announcement/list",
-    "/api/ads/text",
-    "/api/ads/plans",
+    # 广告投放相关接口需要登录后访问，不再公共开放
     "/api/ads/applications",
     "/api/ads/payment/methods",
 }
@@ -261,6 +257,10 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("Referrer-Policy", "no-referrer")
         response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'none'; frame-ancestors 'none'",
+        )
         if path.startswith("/api/") or path.startswith("/ai/"):
             response.headers.setdefault("Cache-Control", "no-store")
         if settings.is_production_like:

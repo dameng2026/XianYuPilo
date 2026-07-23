@@ -230,14 +230,22 @@ check_disk_space() {
   fi
 }
 
-# 检测 GHCR 连通性（5秒超时）
-check_ghcr_reachable() {
+# 检测镜像仓库连通性（5秒超时）
+# registry /v2/ 端点返回 401/403 表示需认证但 registry 可达；000 表示连接失败
+# 参数 $1：registry 的 /v2/ 探测 URL，默认阿里云 ACR
+check_registry_reachable() {
+  local url="${1:-https://registry.cn-hangzhou.aliyuncs.com/v2/}"
+  local code=""
   if command -v curl >/dev/null 2>&1; then
-    curl -fsS --max-time 5 -o /dev/null https://ghcr.io/v2/ 2>/dev/null && return 0
+    code=$(curl -sS --max-time 5 -o /dev/null -w "%{http_code}" "$url" 2>/dev/null)
   elif command -v wget >/dev/null 2>&1; then
-    wget -qO- --timeout=5 https://ghcr.io/v2/ >/dev/null 2>&1 && return 0
+    code=$(wget --timeout=5 --server-response -qO /dev/null "$url" 2>&1 \
+      | grep -oE 'HTTP/[0-9.]+ [0-9]+' | tail -1 | grep -oE '[0-9]+$')
   fi
-  return 1
+  case "$code" in
+    200|401|403) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # 失败自动诊断：收集关键信息供排查
@@ -380,22 +388,22 @@ if [ "$DO_BUILD" = "1" ]; then
 else
   pull_ok=0
   if [ "$DO_PULL" = "1" ]; then
-    # 检测 GHCR 连通性，国内网络超时则直接建议本地构建
-    info "检测 GHCR 镜像源连通性..."
-    if check_ghcr_reachable; then
-      ok "GHCR 可达"
+    # 检测镜像源连通性（默认阿里云 ACR），不可达则直接本地构建
+    info "检测镜像源连通性（阿里云 ACR）..."
+    if check_registry_reachable; then
+      ok "镜像源可达"
       info "拉取最新镜像（首次约 3-5 分钟）..."
       if $DOCKER_COMPOSE pull 2>&1; then
         pull_ok=1
       else
-        warn "镜像拉取失败（可能是 GHCR 镜像未发布或命名空间不匹配）"
+        warn "镜像拉取失败（可能是镜像未发布或命名空间不匹配）"
         info "自动回退到本地源码构建（首次约 5-10 分钟）..."
         DO_BUILD=1
       fi
     else
-      warn "GHCR 不可达（国内网络或防火墙限制）"
+      warn "镜像源不可达（网络或防火墙限制）"
       info "建议直接本地构建（避免拉取超时）..."
-      info "如需使用预构建镜像，请配置 Docker registry mirror 或代理后重试"
+      info "如需使用预构建镜像，可在 .env 中切换 GHCR 镜像源或配置代理后重试"
       info "正在尝试本地构建..."
       DO_BUILD=1
     fi

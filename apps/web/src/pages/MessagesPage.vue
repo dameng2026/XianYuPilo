@@ -2679,6 +2679,19 @@ async function selectChat(chat) {
     }
     return
   }
+
+  // 切换到新会话前，先把"上一个正在查看的会话"标记为已读。
+  // 原因：查看上一个会话期间，可能又通过 SSE 收到了新消息，本地 unreadCount 虽被置 0，
+  // 但后端 xianyu_conversation.unread_count 可能仍 > 0，导致侧栏仍显示未读红点。
+  const previousConversation = selected.value
+  if (previousConversation && conversationDedupeKey(previousConversation) !== conversationDedupeKey(chat)) {
+    const previousId = conversationDbId(previousConversation)
+    if (previousId) {
+      markConversationRead(previousId, MESSAGE_BACKGROUND_REQUEST_CONFIG).catch(() => {})
+      setConversationUnread(previousConversation, 0)
+    }
+  }
+
   selected.value = { ...chat, unreadCount: 0 }
   setConversationUnread(chat, 0)
   const id = conversationDbId(chat)

@@ -34,12 +34,20 @@ dogfood-output/
 output/
 apps/api/uploads/
 apps/api/screenshots/
+apps/crawler/screenshots/
 apps/web/mobile-*.png
 
 # Internal migration/provenance working papers are archived outside the public tree.
 docs/handoffs/
 docs/specs/
+docs/superpowers/
 HANDOFF_EXECUTION_DOC.md
 
 # Backup sync files
 .backup-sync/
+
+# Local-only helper scripts (not for public release)
+restart-local.bat
+stop-all.bat
+start-local-windowed.bat
+scripts/restart-local.ps1

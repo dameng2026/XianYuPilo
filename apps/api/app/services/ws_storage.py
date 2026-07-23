@@ -1,8 +1,8 @@
-"""
+﻿"""
 WebSocket 消息存储模块。
 
 将 WebSocket 收到的消息存储到 xianyu_chat_message 表，
-同时更新 xianyu_conversation 和 xianyu_message 表。
+同时更新 xianyu_conversation 和 xianyu_chat_message 表。
 """
 import base64
 import asyncio
@@ -950,23 +950,23 @@ async def _load_ai_reply_context_messages(
     query = """
             SELECT
                 xm.id,
-                xm.conversation_id,
-                xm.content,
-                xm.message_type,
+                xm.s_id AS conversation_id,
+                xm.msg_content AS content,
+                xm.content_type AS message_type,
                 xm.direction,
-                xm.is_auto_reply,
-                xm.created_time,
-                xm.from_user_id,
-                xm.to_user_id,
+                1 AS is_auto_reply,
+                xm.message_time AS created_time,
+                xm.sender_user_id AS from_user_id,
+                xm.receiver_user_id AS to_user_id,
                 c.peer_key,
                 c.external_buyer_id
-            FROM xianyu_message xm
+            FROM xianyu_chat_message xm
             JOIN xianyu_conversation c
-                ON c.id = xm.conversation_id
+                ON c.s_id = xm.s_id
                AND c.account_id = xm.account_id
             WHERE xm.account_id = :account_id
               AND xm.deleted = 0
-              AND COALESCE(xm.is_auto_reply, 0) = 1
+              AND xm.direction = 'OUT'
     """
     params: dict[str, Any] = {
         "account_id": account_id,
@@ -974,11 +974,11 @@ async def _load_ai_reply_context_messages(
     filters: list[str] = []
     bind_params = []
     if conversation_ids:
-        filters.append("xm.conversation_id IN :conversation_ids")
+        filters.append("c.id IN :conversation_ids")
         params["conversation_ids"] = conversation_ids
         bind_params.append(bindparam("conversation_ids", expanding=True))
     if peer_variants:
-        filters.append("xm.to_user_id IN :peer_variants")
+        filters.append("xm.receiver_user_id IN :peer_variants")
         params["peer_variants"] = peer_variants
         bind_params.append(bindparam("peer_variants", expanding=True))
     if not filters:
@@ -992,9 +992,9 @@ async def _load_ai_reply_context_messages(
     if message_times:
         start_ms = min(message_times) - 10 * 60 * 1000
         end_ms = max(message_times) + 10 * 60 * 1000
-        params["start_time"] = _to_datetime_from_millis(start_ms)
-        params["end_time"] = _to_datetime_from_millis(end_ms)
-        query += " AND xm.created_time BETWEEN :start_time AND :end_time"
+        params["start_time"] = start_ms
+        params["end_time"] = end_ms
+        query += " AND xm.message_time BETWEEN :start_time AND :end_time"
     rows = await db.execute(text(query).bindparams(*bind_params), params)
     messages: list[dict[str, Any]] = []
     for row in rows.mappings().all():
@@ -1724,19 +1724,19 @@ async def _apply_ai_reply_preview(
         text("""
             SELECT
                 xm.id,
-                xm.conversation_id,
-                xm.to_user_id,
-                xm.content,
-                xm.message_type,
+                xm.s_id AS conversation_id,
+                xm.receiver_user_id AS to_user_id,
+                xm.msg_content AS content,
+                xm.content_type AS message_type,
                 xm.direction,
-                xm.is_auto_reply,
-                xm.created_time
-            FROM xianyu_message xm
+                1 AS is_auto_reply,
+                xm.message_time AS created_time
+            FROM xianyu_chat_message xm
             WHERE xm.account_id = :account_id
               AND xm.deleted = 0
-              AND COALESCE(xm.is_auto_reply, 0) = 1
-              AND xm.to_user_id IN :peer_variants
-            ORDER BY xm.created_time DESC, xm.id DESC
+              AND xm.direction = 'OUT'
+              AND xm.receiver_user_id IN :peer_variants
+            ORDER BY xm.message_time DESC, xm.id DESC
         """).bindparams(bindparam("peer_variants", expanding=True)),
         {
             "account_id": account_id,
@@ -2169,13 +2169,13 @@ async def save_chat_message(
                 exc_info=True,
             )
 
-    # 插入 xianyu_message（兼容旧数据流）
+    # 插入 xianyu_chat_message（兼容旧数据流）
     if sync_legacy_message:
         try:
-            await _insert_xianyu_message(db, account_id, msg)
+            await _insert_xianyu_chat_message(db, account_id, msg)
         except Exception:
             logger.error(
-                "插入 xianyu_message 失败（不影响主流程）accountId=%d",
+                "插入 xianyu_chat_message 失败（不影响主流程）accountId=%d",
                 account_id,
                 exc_info=True,
             )
@@ -2413,12 +2413,12 @@ async def _upsert_conversation(
             raise
 
 
-async def _insert_xianyu_message(
+async def _insert_xianyu_chat_message(
     db: AsyncSession,
     account_id: int,
     msg: dict,
 ):
-    """兼容旧数据流：同步写入 xianyu_message 表。"""
+    """兼容旧数据流：同步写入 xianyu_chat_message 表。"""
     direction = str(msg.get("direction") or "IN").upper()
     # The legacy compatibility table follows the ORM contract: varchar
     # sent/received and created_time only. Do not borrow columns or numeric
@@ -2437,13 +2437,13 @@ async def _insert_xianyu_message(
 
     await db.execute(
         text("""
-            INSERT INTO xianyu_message (account_id, conversation_id, session_id,
-                from_user_id, to_user_id, content, message_type, direction,
-                created_time, deleted
+            INSERT INTO xianyu_chat_message (account_id, s_id,
+                sender_user_id, receiver_user_id, msg_content, content_type, direction,
+                message_time, deleted
             ) VALUES (
-                :account_id, NULL, :session_id, :from_user_id, :to_user_id,
-                :content, :message_type, :direction,
-                FROM_UNIXTIME(:created_time / 1000), 0
+                :account_id, :session_id, :from_user_id, :to_user_id,
+                :content, :content_type_int, :direction_code,
+                :created_time, 0
             )
         """),
         {
@@ -2452,8 +2452,8 @@ async def _insert_xianyu_message(
             "from_user_id": sender_user_id or None,
             "to_user_id": receiver_user_id or None,
             "content": msg.get("msgContent") or "",
-            "message_type": str(msg.get("contentType") or 1),
-            "direction": direction_value,
+            "content_type_int": int(msg.get("contentType") or 1),
+            "direction_code": "OUT" if direction_value == "sent" else "IN",
             "created_time": message_time,
         }
     )
@@ -2470,7 +2470,8 @@ async def update_message_read_status(
         text("""
             UPDATE xianyu_chat_message
             SET read_status = :read_status,
-                updated_time = NOW()WHERE account_id = :account_id
+                updated_time = NOW()
+            WHERE account_id = :account_id
               AND pnm_id = :pnm_id
               AND deleted = 0
         """),

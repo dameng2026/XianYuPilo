@@ -15,6 +15,7 @@
 - **送货工作流兼容性增强**：`delivery_workflow_compat` 路由扩展发货工作流兼容接口，补齐发货配置与文本源相关端点
 - **自动发货补发恢复服务**：新增 `delivery_recovery.py` 服务，worker 集成定期补发扫描逻辑，覆盖 WS 事件丢失与启动遗漏场景
 - **数据库迁移 031/032**：新增 `031_conversation_auto_reply_state`（会话自动回复状态持久化）、`032_delivery_text_source_card_mode`（发货文本源卡片模式）两份版本化迁移脚本
+- **国内镜像源加速（阿里云 ACR）**：GitHub Actions 构建镜像后用 `docker buildx imagetools create` 将多架构 manifest 同步到阿里云 ACR 个人版（不重新构建，秒级完成）；`docker-compose.yml` 三个服务默认镜像源改为 ACR（国内拉取快），GHCR 保留为海外备用源，可通过 `.env` 的 `IMAGE_*` 变量切换；`start.sh` / `start.bat` 镜像源连通性检测目标同步改为 ACR（401/403 也视为可达）；ACR 仓库设为公开，开源用户无需 `docker login` 即可直接拉取
 
 ### 变更
 - **系统配置页隐藏商业版后台地址**：开源版"商业版桥接状态"板块不再展示商业版后台 URL，仅保留商业版前台 URL 用于引流；后端 `/system/runtime-status` 与 `commercial_bridge.get_commercial_bridge_runtime` 同步移除 `commercialAdminUrl` 字段返回（保留 `commercialFrontendUrl`），避免开源用户通过浏览器获取商业版后台地址；同时 `commercialBridgeMessage` 中的 http(s) URL 统一脱敏为 `[已隐藏]`，防止 httpx 异常消息泄露商业版后端 origin

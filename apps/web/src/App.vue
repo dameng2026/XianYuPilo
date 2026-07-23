@@ -176,6 +176,12 @@ const mobileLitePages = new Set([
   'profile'
 ])
 const isKnownPage = key => Boolean(pageMap[key]) || settingsKeys.includes(key)
+// 路由别名：兼容旧版 URL 和用户可能输入的常见路径
+const routeAliases = {
+  'automation/delivery': 'auto-delivery',
+  'automation/reply': 'auto-reply',
+  'settings': 'settings-system',
+}
 const getRoute = () => resolveHashRoute(location.hash, isKnownPage, defaultPage)
 const getHash = () => getRoute().page
 
@@ -368,6 +374,12 @@ async function onHeaderAction(action) {
 }
 
 function onHash() {
+  // 别名重定向：将旧版 URL 映射到当前页面键
+  const fullPath = String(location.hash || '').replace(/^#\/?/, '').split('?')[0]
+  if (routeAliases[fullPath]) {
+    location.hash = `#/${routeAliases[fullPath]}`
+    return  // hashchange 事件会再次触发 onHash
+  }
   const route = getRoute()
   const next = route.page
   if (!isAuthed() && !authPages.includes(next)) {
@@ -435,7 +447,11 @@ async function boot() {
       await loadCurrentUser()
       if (!getToken()) return
       startSse()
-      if (!location.hash || authPages.includes(getHash())) navigate(defaultPage)
+      if (!location.hash || authPages.includes(getHash())) {
+        navigate(defaultPage)
+      } else {
+        onHash()  // 处理当前 hash（含别名重定向）
+      }
       return
     }
     if (!location.hash) {

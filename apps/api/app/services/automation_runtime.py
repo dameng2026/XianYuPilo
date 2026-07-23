@@ -42,7 +42,7 @@ from .business_settings import (
 )
 from .ws_client import ws_manager
 from .ws_storage import save_chat_message
-from ..models.entities import AiAutoReplyAttempt
+from ..models.entities import AiAutoReplyAttempt, AutoReplyRule
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +137,104 @@ def _build_ai_reply_command(payload: dict[str, Any]) -> AiAutoReplyCommand:
     )
 
 
+def _parse_rule_keywords(raw: Any) -> list[str]:
+    """解析规则关键词字符串，支持多种分隔符。"""
+    text_value = str(raw or "").strip()
+    if not text_value:
+        return []
+    separators = [",", "\uff0c", "\n", "\r", ";", "\uff1b", "|", "/", "\u3001"]
+    for separator in separators[1:]:
+        text_value = text_value.replace(separator, separators[0])
+    return [item.strip() for item in text_value.split(separators[0]) if item.strip()]
+
+
+async def _try_keyword_auto_reply(
+    db: AsyncSession,
+    *,
+    account_id: int,
+    content: str,
+    s_id: str,
+    buyer_id: str,
+    buyer_name: str,
+    goods_id: str,
+    seller_external_uid: str,
+) -> bool:
+    """关键词自动回复规则匹配。
+
+    在 AI 自动回复之前检查是否有匹配的关键词规则。若匹配则直接发送规则配置的
+    回复内容并返回 True，调用方应跳过后续 AI 自动回复流程。
+    """
+    if not content or not account_id:
+        return False
+
+    query = select(AutoReplyRule).where(
+        AutoReplyRule.deleted == 0,
+        AutoReplyRule.status == 1,
+        or_(
+            AutoReplyRule.account_id == account_id,
+            AutoReplyRule.account_id.is_(None),
+        ),
+    )
+    result = await db.execute(query.order_by(
+        AutoReplyRule.priority.desc(),
+        AutoReplyRule.id.desc(),
+    ))
+    rules = result.scalars().all()
+    if not rules:
+        return False
+
+    message_lower = content.lower()
+    matched_rule = None
+    for rule in rules:
+        match_type = (rule.match_type or "keyword").strip().lower()
+        if match_type == "all":
+            matched_rule = rule
+            break
+        if match_type == "keyword":
+            keywords = _parse_rule_keywords(rule.match_keywords)
+            if keywords and any(kw.lower() in message_lower for kw in keywords):
+                matched_rule = rule
+                break
+
+    if not matched_rule:
+        return False
+
+    reply_text = str(matched_rule.reply_content or "").strip()
+    if not reply_text:
+        return False
+
+    sent = await _send_reply_message(account_id, s_id, buyer_id, reply_text)
+    if not sent:
+        logger.warning(
+            "关键词自动回复发送失败 accountId=%d ruleId=%d",
+            account_id,
+            matched_rule.id,
+        )
+        return False
+
+    # 落库回复消息（与 AI 自动回复使用相同的持久化路径）
+    pnm_id = f"kw-{account_id}-{int(time.time() * 1000)}-{hashlib.md5(reply_text.encode()).hexdigest()[:8]}"
+    await _save_reply_message(
+        db,
+        account_id,
+        s_id,
+        buyer_id,
+        buyer_name,
+        reply_text,
+        goods_id,
+        seller_external_uid,
+        pnm_id=pnm_id,
+    )
+
+    logger.info(
+        "关键词自动回复已发送 accountId=%d ruleId=%d ruleName=%s",
+        account_id,
+        matched_rule.id,
+        matched_rule.rule_name or "",
+    )
+    return True
+
+
 async def process_incoming_message(db: AsyncSession, payload: dict[str, Any]) -> None:
     """处理收到的买家消息，按需触发 AI 自动回复。
 
@@ -195,6 +293,21 @@ async def process_incoming_message(db: AsyncSession, payload: dict[str, Any]) ->
             "AI 自动回复跳过：会话级状态机 accountId=%d reason=%s",
             account_id, conv_state_reason,
         )
+        return
+
+    # Step 1.6: 关键词自动回复规则匹配（在 AI 自动回复之前）
+    # 若匹配到关键词规则，直接发送规则配置的回复内容，跳过 AI 自动回复
+    keyword_matched = await _try_keyword_auto_reply(
+        db,
+        account_id=account_id,
+        content=content,
+        s_id=s_id,
+        buyer_id=buyer_id,
+        buyer_name=buyer_name,
+        goods_id=goods_id,
+        seller_external_uid=seller_external_uid,
+    )
+    if keyword_matched:
         return
 
     # Step 2: 加载 AI 客服配置（含 systemPrompt / 知识库 / 聊天规则 / 人设）

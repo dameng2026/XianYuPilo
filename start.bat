@@ -172,21 +172,23 @@ if "%DO_BUILD%"=="1" (
   set BUILD_OK=1
 ) else (
   if "%DO_PULL%"=="1" (
-    REM 检测 GHCR 连通性（5秒超时）
-    echo [*] 检测 GHCR 镜像源连通性...
-    curl -fsS --max-time 5 -o nul https://ghcr.io/v2/ >nul 2>&1
+    REM 检测镜像源连通性（5秒超时，401/403 也算 registry 可达）
+    echo [*] 检测镜像源连通性（阿里云 ACR）...
+    set HTTP_CODE=000
+    for /f "delims=" %%i in ('curl -sS --max-time 5 -o nul -w "%%{http_code}" https://registry.cn-hangzhou.aliyuncs.com/v2/ 2^>nul') do set HTTP_CODE=%%i
+    echo !HTTP_CODE! | findstr "200 401 403" >nul
     if errorlevel 1 (
-      echo [!] GHCR 不可达（国内网络或防火墙限制）
+      echo [!] 镜像源不可达（网络或防火墙限制）
       echo     建议直接本地构建（避免拉取超时）...
-      echo     如需使用预构建镜像，请配置 Docker registry mirror 或代理后重试
+      echo     如需使用预构建镜像，可在 .env 中切换 GHCR 镜像源或配置代理后重试
       echo     正在尝试本地构建...
       set DO_BUILD=1
     ) else (
-      echo [OK] GHCR 可达
+      echo [OK] 镜像源可达
       echo [*] 拉取最新镜像（首次约 3-5 分钟）...
       docker compose pull
       if errorlevel 1 (
-        echo [!] 镜像拉取失败（可能是 GHCR 镜像未发布或命名空间不匹配）
+        echo [!] 镜像拉取失败（可能是镜像未发布或命名空间不匹配）
         echo     自动回退到本地源码构建（首次约 5-10 分钟）...
         set DO_BUILD=1
       ) else (

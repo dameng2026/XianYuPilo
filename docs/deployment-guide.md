@@ -91,8 +91,8 @@ sh ./start.sh
    - 创建空的 `admin-password-hash` 文件（由 api 镜像在启动前自动生成 bcrypt hash，无需主机 Python）
    - 从 `.env.example` 复制生成 `.env`
 4. **端口冲突自动处理**：若 8080 被占用，自动尝试 8081-8089，找到可用端口后自动更新 `.env`
-5. **GHCR 连通性检测**：拉取前检测 GHCR 是否可达，不可达时直接本地构建（避免拉取超时）
-6. **拉取镜像或本地构建**：优先尝试拉取 GHCR 预构建镜像；若拉取失败或 GHCR 不可达，自动回退到本地源码构建
+5. **镜像源连通性检测**：拉取前检测阿里云 ACR 是否可达，不可达时直接本地构建（避免拉取超时）
+6. **拉取镜像或本地构建**：优先尝试拉取 ACR 预构建镜像（国内拉取快）；若拉取失败或镜像源不可达，自动回退到本地源码构建
 7. **bcrypt hash 自动生成**：用已就绪的 api 镜像生成 admin 密码 hash（零额外下载，必定成功）
 8. **启动 7 个服务**：mysql、redis、migrate（一次性）、crawler、api、worker、web
 9. **分阶段健康检查**：按依赖顺序检查 MySQL → migrate → Redis → API → Web，每阶段显示进度和耗时
@@ -240,7 +240,7 @@ start.bat
    - 创建空的 `admin-password-hash` 文件（由 api 镜像在启动前自动生成 bcrypt hash）
    - 从 `.env.example` 复制生成 `.env`
 4. **端口冲突自动处理**：若 8080 被占用，自动尝试 8081-8089，找到可用端口后自动更新 `.env`
-5. **GHCR 连通性检测**：拉取前检测 GHCR 是否可达，不可达时直接本地构建
+5. **镜像源连通性检测**：拉取前检测阿里云 ACR 是否可达，不可达时直接本地构建
 6. **拉取镜像或本地构建**：与 Linux 版本一致
 7. **bcrypt hash 自动生成**：用已就绪的 api 镜像生成（零额外下载，必定成功）
 8. **启动 7 个服务**
@@ -485,18 +485,37 @@ del .env
 
 **现象**：`Error response from daemon: error from registry: denied` 或拉取超时。
 
-**原因**：GHCR 上的预构建镜像未发布、命名空间不匹配，或国内网络无法访问 GHCR。
+**原因**：镜像未发布、命名空间不匹配，或镜像源网络不可达。本项目默认使用**阿里云 ACR**（国内拉取快），GHCR 作为海外备用源。ACR 仓库已设为公开，开源用户无需 `docker login` 即可直接 `docker pull`。
 
-**解决**：`start.sh` / `start.bat` 已自动处理——拉取前会检测 GHCR 连通性，不可达时直接本地构建。如仍失败：
+**解决**：`start.sh` / `start.bat` 已自动处理——拉取前会检测镜像源连通性，不可达时直接本地构建。如仍失败：
 
 ```bash
 sh ./start.sh --build          # Linux / macOS
 .\start.bat --build            # Windows
 ```
 
+#### 切换镜像源（ACR ↔ GHCR）
+
+默认拉取阿里云 ACR。如需切换到 GHCR（海外部署）或 ACR 拉取失败，编辑 `.env`：
+
+```bash
+# 取消注释并改为 GHCR（海外部署推荐）
+API_IMAGE=ghcr.io/xianyu-assistant-opensource/xianyu-assistant-api:latest
+WEB_IMAGE=ghcr.io/xianyu-assistant-opensource/xianyu-assistant-web:latest
+CRAWLER_IMAGE=ghcr.io/xianyu-assistant-opensource/xianyu-assistant-crawler:latest
+```
+
+切换后重新拉取：
+
+```bash
+sh ./start.sh --no-pull    # 用已拉取/构建的镜像启动
+# 或
+sh ./start.sh              # 重新尝试拉取
+```
+
 #### 国内网络优化（镜像加速）
 
-如果在国内部署且本地构建也慢（npm/pip 下载慢），可配置镜像加速：
+默认 ACR 镜像源已是国内节点，通常无需额外加速。若本地构建慢（npm/pip 下载慢），可配置 Docker registry mirror：
 
 **1. 配置 Docker registry mirror（加速基础镜像拉取）**
 
@@ -529,14 +548,6 @@ Environment="NO_PROXY=localhost,127.0.0.1"
 EOF
 sudo systemctl daemon-reload
 sudo systemctl restart docker
-```
-
-**3. 切换镜像源后重新拉取**
-
-```bash
-sh ./start.sh --no-pull    # 用已拉取/构建的镜像启动
-# 或
-sh ./start.sh              # 重新尝试拉取
 ```
 
 ### Q5：忘记 admin 密码
